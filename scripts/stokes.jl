@@ -1,13 +1,4 @@
-#= 
-([source code](SOURCE_URL))
-
-minimalistic script, that solves a stochastic Poisson problem on a uniform mesh
-
-usage:
-- run main: main(; problem = problem, kwargs...)
-=#
-
-module PoissonSimple
+module Stokes
 
 using ExtendableASGFEM
 using ExtendableFEM
@@ -15,26 +6,38 @@ using ExtendableFEMBase
 using ExtendableGrids
 using GridVisualize
 
+function f!(result, qpinfo)
+    x = qpinfo.x[1]
+    y = qpinfo.x[2]
+    result[1] = 5(x^4) + 12(x^2) * ((-1 + x)^2) * (-1 + y) + 12(x^2) * ((-1 + x)^2) * y + 4(x^2) * y * ((-1 + y)^2) + 4(x^2) * (-1 + y) * (y^2) + 4((-1 + x)^2) * (-1 + y) * (y^2) + 4((-1 + x)^2) * y * ((-1 + y)^2) + 16x * (-1 + x) * (-1 + y) * (y^2) + 16x * (-1 + x) * y * ((-1 + y)^2)
+    return result[2] = 5(y^4) - 4x * ((-1 + x)^2) * ((-1 + y)^2) - 4(-1 + x) * (x^2) * ((-1 + y)^2) - 4x * ((-1 + x)^2) * (y^2) - 4(-1 + x) * (x^2) * (y^2) - 16(-1 + x) * (x^2) * y * (-1 + y) - 16x * ((-1 + x)^2) * y * (-1 + y) - 12x * (y^2) * ((-1 + y)^2) - 12(-1 + x) * (y^2) * ((-1 + y)^2)
+    #result[1] = 5(x^4) - 0.001(-12(x^2) * ((-1 + x)^2) * (-1 + y) - 12(x^2) * ((-1 + x)^2) * y - 4(x^2) * y * ((-1 + y)^2) - 4(x^2) * (-1 + y) * (y^2) - 4((-1 + x)^2) * (-1 + y) * (y^2) - 4((-1 + x)^2) * y * ((-1 + y)^2) - 16x * (-1 + x) * (-1 + y) * (y^2) - 16x * (-1 + x) * y * ((-1 + y)^2))
+    #result[2] = 5(y^4) - 0.001(4x * ((-1 + x)^2) * ((-1 + y)^2) + 4(-1 + x) * (x^2) * ((-1 + y)^2) + 4x * ((-1 + x)^2) * (y^2) + 4(-1 + x) * (x^2) * (y^2) + 16(-1 + x) * (x^2) * y * (-1 + y) + 16x * ((-1 + x)^2) * y * (-1 + y) + 12x * (y^2) * ((-1 + y)^2) + 12(-1 + x) * (y^2) * ((-1 + y)^2))
+    #result[1] = 1000 * (1 - x) * x * y * (1 - y)
+    #result[2] = 1000 * (1 - x) * x * y * (1 - y)
+end
+
 function main(;
-        problem = PoissonProblemPrimal, #LogTransformedPoissonProblemDual,
+        problem = StokesProblemPrimal,
         nrefs = 3,      # number of uniform refinements of the initial grid
         order = 2,      # polynomial order of the FEspaces
         decay = 2.0,    # decay factor for the random coefficient
-        mean = problem == PoissonProblemPrimal ? 1.0 : 0.0, # mean value of coefficient
+        mean = 1, # mean value of coefficient
         domain = "square",  # domain, e.g., "square" or "lshape"
         initial_modes = [[0], [1, 0], [0, 1], [2, 0], [0, 0, 1]],   # initial multi-indices for stochastic basis
-        (f!) = (result, qpinfo) -> (result[1] = 1),       # right-hand side function
+        (f!) = f!,       # right-hand side function
         use_iterative_solver = true,    # use iterative solver ? (otherwise direct)
         Plotter = nothing,
         debug = false,
     )
-    @info problem
     ## prepare stochastic coefficient
-    τ = (problem <: PoissonProblemPrimal) ? 0.9 : 1.0
-    if problem <: PoissonProblemPrimal
-        @assert mean >= 1 "coefficient needs to be at least 1 to ensure ellipticity"
+    C = StochasticCoefficientCosinus(; τ = 0.9, decay = decay, mean = mean)
+    result = zeros(1)
+    for i in 1:10
+        a! = get_a!(C)
+        a!(result, [0.3, 0.3], rand(Float64, 10))
+        @info "sampled = ", result[1]
     end
-    C = StochasticCoefficientCosinus(; τ = τ, decay = decay, mean = mean)
 
     ## prepare grid
     xgrid = if domain == "square"
@@ -49,20 +52,14 @@ function main(;
     multi_indices = Array{Array{Int, 1}, 1}(initial_modes)
     prepare_multi_indices!(multi_indices)
     M = maximum(length.(multi_indices))
-    OBType = problem <: PoissonProblemPrimal ? LegendrePolynomials : HermitePolynomials
+    OBType = LegendrePolynomials
     ansatz_deg = maximum([maximum(multi_indices[k]) for k in 1:length(multi_indices)]) + 4
     TensorBasis = TensorizedBasis(OBType, M, ansatz_deg, 2 * ansatz_deg, 2 * ansatz_deg, multi_indices = multi_indices)
 
     ## prepare FE spaces
-    if problem <: LogTransformedPoissonProblemDual
-        FEType = [HDIVRTk{2, order}, order == 0 ? L2P0{1} : H1Pk{1, 2, order}]
-        FES = [FESpace{FEType[1]}(xgrid), FESpace{FEType[2]}(xgrid; broken = true)]
-        unames = ["p", "u"]
-    else
-        FEType = H1Pk{1, 2, order}
-        FES = FESpace{FEType}(xgrid)
-        unames = ["u"]
-    end
+    FETypes = (H1BR{2}, L2P0{1})
+    FES = [FESpace{FETypes[1]}(xgrid), FESpace{FETypes[2]}(xgrid)]
+    unames = ["u", "p"]
 
     ## create solution vector
     sol = SGFEVector(FES, TensorBasis; active_modes = 1:length(multi_indices), unames = unames)
@@ -87,4 +84,4 @@ function main(;
     return sol
 end
 
-end # module
+end

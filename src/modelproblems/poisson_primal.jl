@@ -11,13 +11,14 @@ abstract type PoissonProblemPrimal <: AbstractModelProblem end
 include("solvers_poisson_primal.jl")
 
 ## deterministic problem description
-function deterministic_problem(::Type{PoissonProblemPrimal}, C::AbstractStochasticCoefficient, sample_pointer; get_a! = get_a!, rhs = nothing, bonus_quadorder_a = 2, bonus_quadorder_f = 0)
+function deterministic_problem(::Type{PoissonProblemPrimal}, C::AbstractStochasticCoefficient, sample_pointer; (get_a!) = get_a!, rhs = nothing, bonus_quadorder_a = 2, bonus_quadorder_f = 0)
     ## kernel for diffusion operator (= exp(a))
 
     a! = get_a!(C; factor = 1)
 
     function kernel_diffusion_a!(result, input, qpinfo)
         a!(result, qpinfo.x, sample_pointer)
+        @info "sampled = ", result[1]
         result .= result[1] * input
         return nothing
     end

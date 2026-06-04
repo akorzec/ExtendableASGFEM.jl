@@ -39,7 +39,7 @@ function deterministic_problem(::Type{LogTransformedPoissonProblemDual}, C::Abst
     end
 
     PD = ProblemDescription("log-transformed Poisson problem (dual)")
-    p = Unknown("p"; name = "stress p = -∇ũ - ∇aũ = - epx(-a) ∇u")
+    p = Unknown("p"; name = "stress p = -∇ũ - ∇aũ = - exp(-a) ∇u")
     u = Unknown("u"; name = "potential ũ = exp(-a) u")
     assign_unknown!(PD, p)
     assign_unknown!(PD, u)
@@ -99,6 +99,9 @@ function solve!(
     G = TensorBasis.G
     nmodes = num_multiindices(TensorBasis)
 
+    @info A
+    @info B
+    @info b0
     ## solve
     if use_iterative_solver
         @time bdofs = solve_logpoisson_dual!(sol, A, B, N0, N, b0, G, nmodes, 1)

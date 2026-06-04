@@ -220,6 +220,11 @@ function solve_full_primal!(SolutionSGFEM::SGFEVector, A0, A, b, G, nmodes, rhsf
     end
     flush!(bigS.entries)
 
+    @info bigS
+    @info bigb
+    @info nmodes
+
+
     @info "Solving StochasticFEM with full matrix..."
     SolutionSGFEM.entries .= bigS.entries \ bigb.entries
     #gmres!(SolutionSGFEM.entries, bigS.entries, bigb.entries)
