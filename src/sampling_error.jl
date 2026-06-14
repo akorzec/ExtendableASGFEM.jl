@@ -1,5 +1,5 @@
 ## kernel for L2 error of stress, i.e || grad(u) - grad(u_h) ||
-function data_error_stress(::Union{Type{<:PoissonProblemPrimal},Type{<:LogTransformedPoissonProblemPrimal}}, dim, C::AbstractStochasticCoefficient, sample_pointer)
+function data_error_stress(::Union{Type{<:PoissonProblemPrimal}, Type{<:LogTransformedPoissonProblemPrimal}}, dim, C::AbstractStochasticCoefficient, sample_pointer)
     function closure(result, input, qpinfo)
         result[1] = 1
         if dim == 1
@@ -27,7 +27,7 @@ function data_error_stress(::Type{<:LogTransformedPoissonProblemDual}, dim, C::A
     return closure, [id(1), id(2)], [(1, 1), (2, 1)]
 end
 
-function data_error_stress(::Union{Type{<:StokesProblemPrimal},Type{<:LogTransformedPoissonProblemPrimal}}, dim, C::AbstractStochasticCoefficient, sample_pointer)
+function data_error_stress(::Union{Type{<:StokesProblemPrimal}, Type{<:LogTransformedPoissonProblemPrimal}}, dim, C::AbstractStochasticCoefficient, sample_pointer)
     function closure(result, input, qpinfo)
         result[1] = 1
         if dim == 1
@@ -42,7 +42,7 @@ function data_error_stress(::Union{Type{<:StokesProblemPrimal},Type{<:LogTransfo
 end
 
 ## kernel for L2 error || u - u_h ||
-function data_error_u(::Union{Type{<:PoissonProblemPrimal},Type{<:LogTransformedPoissonProblemPrimal}}, dim, C::AbstractStochasticCoefficient, sample_pointer)
+function data_error_u(::Union{Type{<:PoissonProblemPrimal}, Type{<:LogTransformedPoissonProblemPrimal}}, dim, C::AbstractStochasticCoefficient, sample_pointer)
     function closure(result, input, qpinfo)
         result[1] = (input[1] - input[2])^2
         return nothing
@@ -66,9 +66,9 @@ function data_error_u(::Type{<:StokesProblemPrimal}, dim, C::AbstractStochasticC
     return closure, [id(1), id(2)], [(1, 1), (2, 1)]
 end
 
-FES4sampling(::Type{PoissonProblemPrimal}, dim, xgrid, order) = [FESpace{H1Pk{1,dim,order}}(xgrid)]
-FES4sampling(::Type{LogTransformedPoissonProblemPrimal}, dim, xgrid, order) = [FESpace{H1Pk{1,dim,order}}(xgrid)]
-FES4sampling(::Type{LogTransformedPoissonProblemDual}, dim, xgrid, order) = [FESpace{HDIVRTk{dim,order}}(xgrid), FESpace{H1Pk{1,dim,order}}(xgrid; broken=true)]
+FES4sampling(::Type{PoissonProblemPrimal}, dim, xgrid, order) = [FESpace{H1Pk{1, dim, order}}(xgrid)]
+FES4sampling(::Type{LogTransformedPoissonProblemPrimal}, dim, xgrid, order) = [FESpace{H1Pk{1, dim, order}}(xgrid)]
+FES4sampling(::Type{LogTransformedPoissonProblemDual}, dim, xgrid, order) = [FESpace{HDIVRTk{dim, order}}(xgrid), FESpace{H1Pk{1, dim, order}}(xgrid; broken = true)]
 FES4sampling(::Type{StokesProblemPrimal}, _, xgrid, order) = [FESpace{H1BR{2}}(xgrid), FESpace{L2P0{1}}(xgrid)]
 
 """
@@ -105,21 +105,21 @@ The m-th component of these arrays gives the error when only multi-indices up to
 This function computes deterministic reference solutions for each sample, then compares them to the SGFEM solution to estimate the error. Both weighted and unweighted (uniform) averages are returned for stress and solution errors.
 """
 function calculate_sampling_error(
-    SolutionSGFEM::SGFEVector,
-    C::AbstractStochasticCoefficient;
-    problem=LogTransformedPoissonProblemPrimal,
-    bonus_quadorder_a=10,
-    bonus_quadorder_f=0,
-    order=2,
-    rhs=nothing,
-    dim=size(SolutionSGFEM.FES_space[1].xgrid[Coordinates], 1),
-    Msamples=maxm(C),
-    parallel_sampling=true,
-    dimensionwise_error=true,
-    energy_norm=true,
-    debug=false,
-    nsamples=100
-)
+        SolutionSGFEM::SGFEVector,
+        C::AbstractStochasticCoefficient;
+        problem = LogTransformedPoissonProblemPrimal,
+        bonus_quadorder_a = 10,
+        bonus_quadorder_f = 0,
+        order = 2,
+        rhs = nothing,
+        dim = size(SolutionSGFEM.FES_space[1].xgrid[Coordinates], 1),
+        Msamples = maxm(C),
+        parallel_sampling = true,
+        dimensionwise_error = true,
+        energy_norm = true,
+        debug = false,
+        nsamples = 100
+    )
 
     nthreads = Threads.nthreads()
     @info "Estimating exact error by MC sampling (with nthreads = $nthreads)"
@@ -127,25 +127,25 @@ function calculate_sampling_error(
     xgrid = FES[1].xgrid
     sol_sgfem = SolutionSGFEM.FEV
     TensorBasis = SolutionSGFEM.TB
-    multi_indices::Array{Array{Int,1},1} = TensorBasis.multi_indices
+    multi_indices::Array{Array{Int, 1}, 1} = TensorBasis.multi_indices
     M::Int = maxlength_multiindices(TensorBasis)
     nmodes = num_multiindices(TensorBasis)
 
     ## generate samples
-    Samples, weights = sample_distribution(TensorBasis, nsamples; M=Msamples, Mweights=Msamples)
+    Samples, weights = sample_distribution(TensorBasis, nsamples; M = Msamples, Mweights = Msamples)
 
     ## prepare array with deterministic solutions
-    sol_det = Array{FEVector,1}(undef, nsamples)
+    sol_det = Array{FEVector, 1}(undef, nsamples)
 
     ## compute deterministic solutions (in parallel)
     Threads.@threads for s in 1:nsamples
 
         ## deterministic problem description
-        PD, u = deterministic_problem(problem, C, Samples[:, s]; rhs=rhs, bonus_quadorder_a=bonus_quadorder_a, bonus_quadorder_f=bonus_quadorder_f)
+        PD, u = deterministic_problem(problem, C, Samples[:, s]; rhs = rhs, bonus_quadorder_a = bonus_quadorder_a, bonus_quadorder_f = bonus_quadorder_f)
 
         ## solve problem for the current sample
         FESSampling = FES4sampling(problem, dim, xgrid, order)
-        sol_det[s] = ExtendableFEM.solve(PD, FESSampling; verbosity=debug ? 0 : -1, timeroutputs=:none)
+        sol_det[s] = ExtendableFEM.solve(PD, FESSampling; verbosity = debug ? 0 : -1, timeroutputs = :none)
 
         print(".")
     end
@@ -157,16 +157,16 @@ function calculate_sampling_error(
     csample = Samples[:, 1]
     kernel_stress!, input_stress, ids_stress = data_error_stress(problem, dim, C, csample)
     kernel_u!, input_u, ids_u = data_error_u(problem, dim, C, csample)
-    ErrorIntegratorL2stress = ItemIntegrator(kernel_stress!, input_stress; resultdim=dim, quadorder=2 * order)
-    ErrorIntegratorL2u = ItemIntegrator(kernel_u!, input_u; quadorder=2 * order)
+    ErrorIntegratorL2stress = ItemIntegrator(kernel_stress!, input_stress; resultdim = dim, quadorder = 2 * order)
+    ErrorIntegratorL2u = ItemIntegrator(kernel_u!, input_u; quadorder = 2 * order)
 
 
     errorL2stress = zeros(Float64, M + 1, nsamples)
     errorL2stress2 = zeros(Float64, M + 1, nsamples)
     errorL2u = zeros(Float64, M + 1, nsamples)
     r::Float64 = 1.0
-    input_stress_sol = Array{FEVectorBlock,1}(undef, 2)
-    input_u_sol = Array{FEVectorBlock,1}(undef, 2)
+    input_stress_sol = Array{FEVectorBlock, 1}(undef, 2)
+    input_u_sol = Array{FEVectorBlock, 1}(undef, 2)
     M0 = dimensionwise_error ? 0 : M
 
     for s in 1:nsamples
@@ -193,9 +193,9 @@ function calculate_sampling_error(
 
             ## compute errors
             result = ExtendableFEM.evaluate(ErrorIntegratorL2stress, input_stress_sol)
-            errorL2stress[m+1, s] = sum(view(result, energy_norm ? 1 : 2, :))
-            errorL2stress2[m+1, s] = sum(view(result, energy_norm ? 2 : 1, :))
-            errorL2u[m+1, s] = sum(view(ExtendableFEM.evaluate(ErrorIntegratorL2u, input_u_sol), 1, :))
+            errorL2stress[m + 1, s] = sum(view(result, energy_norm ? 1 : 2, :))
+            errorL2stress2[m + 1, s] = sum(view(result, energy_norm ? 2 : 1, :))
+            errorL2u[m + 1, s] = sum(view(ExtendableFEM.evaluate(ErrorIntegratorL2u, input_u_sol), 1, :))
         end
 
         @info "SAMPLE $s of $nsamples
@@ -207,9 +207,9 @@ function calculate_sampling_error(
 
         if debug ## plot deterministic solution and evaluation of SGFEM solution for sample
             @show extrema(view(sol_det.entries, 1:num_nodes(xgrid)))
-            println(stdout, unicode_scalarplot(input_u_sol[1]; title="det. reference solution for sample $s"))
+            println(stdout, unicode_scalarplot(input_u_sol[1]; title = "det. reference solution for sample $s"))
             @show extrema(view(sol_sgfem.entries, 1:num_nodes(xgrid)))
-            println(stdout, unicode_scalarplot(input_u_sol[2]; title="SGFEM evaluation for sample $s"))
+            println(stdout, unicode_scalarplot(input_u_sol[2]; title = "SGFEM evaluation for sample $s"))
         end
     end
 

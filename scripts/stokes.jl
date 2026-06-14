@@ -32,12 +32,12 @@ function main(;
     )
     ## prepare stochastic coefficient
     C = StochasticCoefficientCosinus(; τ = 0.9, decay = decay, mean = mean)
-    result = zeros(1)
+    """result = zeros(1)
     for i in 1:10
         a! = get_a!(C)
         a!(result, [0.3, 0.3], rand(Float64, 10))
         @info "sampled = ", result[1]
-    end
+    end"""
 
     ## prepare grid
     xgrid = if domain == "square"
