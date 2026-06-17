@@ -174,7 +174,6 @@ function solve_full_primal!(SolutionSGFEM::SGFEVector, A0, A, b, G, nmodes, rhsf
     M::Int = length(A) # size(G,1) / nmodes
 
     FES = SolutionSGFEM.FES_space[1]
-    @show FES
     multi_indices = SolutionSGFEM.TB.multi_indices
     nmodes = num_multiindices(SolutionSGFEM)
     bigFES = [FES for j in 1:nmodes]

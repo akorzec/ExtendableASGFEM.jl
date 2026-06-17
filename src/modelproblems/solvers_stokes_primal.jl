@@ -23,9 +23,31 @@ end
 
 function stokesPrimalPreconditioner(A0::ExtendableSparseMatrix{Tv, Ti}, B::ExtendableSparseMatrix{Tv, Ti}, bdofs, nmodes, vsize) where {Tv, Ti}
     DA::Array{Tv, 1} = zeros(Tv, size(A0, 1))
-    for j in length(DA)
+    for j in 1:length(DA)
         DA[j] = A0[j, j]
     end
+
+    # compute S = B inv(A_diag) B'
+    S = ExtendableSparseMatrix{Tv, Ti}(size(B, 2), size(B, 2))
+    cscmat::SparseMatrixCSC{Tv, Ti} = B.cscmatrix
+    rows::Array{Ti, 1} = rowvals(cscmat)
+    valsB::Array{Tv, 1} = cscmat.nzval
+    value::Tv = 0
+    row::Ti = 0
+    for i in 1:size(B, 2), j in 1:size(B, 2)
+        for r in nzrange(cscmat, i), r2 in nzrange(cscmat, j)
+            if rows[r] == rows[r2]
+                row = rows[r]
+                #@info "DA[row] = ", DA[row]
+                value = valsB[r] * valsB[r2] / DA[row]
+                _addnz(S, i, j, value, 1)
+            end
+        end
+    end
+
+    # compute LU factorisation of S
+    flush!(S)
+    LUS = lu(S.cscmatrix)
 
     # compute LU factorisation of S
     for dof in bdofs
@@ -151,7 +173,6 @@ function solve_stokes_primal!(SolutionSGFEM::SGFEVector, A0, A, B, b0, G, nmodes
     end
 
     ## solve
-    # ERROR: BoundsError: attempt to access Int64 at index [2]
     @info "...starting right-conditioned GMRES"
     x, history = Krylov.gmres(S, b.entries, SolutionSGFEM.entries; ldiv = true, atol = atol, rtol = rtol, M = P)
     SolutionSGFEM.entries .= x
@@ -175,7 +196,6 @@ function solve_stokes_primal_full!(SolutionSGFEM::SGFEVector, A0, A, B, b0, G, n
     bigb = FEVector(bigFES)
 
     for j in 1:nmodes
-        @info bigS[j, j]
         addblock!(bigS[j, j], A0[1, 1])
         addblock!(bigS[j, nmodes + j], B[1, 1])
         addblock!(bigS[nmodes + j, j], B[1, 1]; transpose = true)
@@ -189,7 +209,6 @@ function solve_stokes_primal_full!(SolutionSGFEM::SGFEVector, A0, A, B, b0, G, n
         for e in 1:M
             g = G[(e - 1) * nmodes + j, k] # ⟨ ξ_m ψ_mi(j) ψ_mi(k) ⟩
             if abs(g) > 1.0e-12
-                @show g, [e, multi_indices[j], multi_indices[k]]
                 addblock!(bigS[j, k], A[e][1, 1]; factor = g)
             end
         end

@@ -18,7 +18,7 @@ function exact_u!(result, qpinfo)
 end
 
 ## deterministic problem description
-function deterministic_problem(::Type{StokesProblemPrimal}, C::AbstractStochasticCoefficient, sample_pointer; (get_a!) = get_a!, rhs = nothing, bonus_quadorder_a = 2, bonus_quadorder_f = 0)
+function deterministic_problem(::Type{StokesProblemPrimal}, C::AbstractStochasticCoefficient, sample_pointer; (get_a!) = (get_a!), rhs = nothing, bonus_quadorder_a = 2, bonus_quadorder_f = 0)
     get_ν! = get_a!(C)
 
     function stokes_kernel!(result, input, qpinfo)
@@ -68,7 +68,6 @@ function solve!(
     A0 = FEMatrix(FES[1])
     assemble!(A0, BilinearOperator(get_am_x(0, C), [grad(1)], [grad(1)]; bonus_quadorder = bonus_quadorder_a))
     A = []
-    @info "Length = ", maxlength_multiindices(TB)
     for m in 1:maxlength_multiindices(TB)
         Am = FEMatrix(FES[1])
         assemble!(Am, BilinearOperator(get_am_x(m, C), [grad(1)], [grad(1)]; bonus_quadorder = bonus_quadorder_a))
@@ -92,7 +91,6 @@ function solve!(
     nmodes = num_multiindices(TB)
 
     ## solve
-    @info use_iterative_solver
     if use_iterative_solver
         @time bdofs = solve_stokes_primal!(sol, A0, A, B, b0, G, nmodes, 1)
     else

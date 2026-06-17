@@ -25,8 +25,9 @@ function main(;
         mean = 1, # mean value of coefficient
         domain = "square",  # domain, e.g., "square" or "lshape"
         initial_modes = [[0], [1, 0], [0, 1], [2, 0], [0, 0, 1]],   # initial multi-indices for stochastic basis
-        (f!) = f!,       # right-hand side function
+        (f!) = (f!),       # right-hand side function
         use_iterative_solver = true,    # use iterative solver ? (otherwise direct)
+        nsamples = 20,
         Plotter = nothing,
         debug = false,
     )
@@ -66,10 +67,10 @@ function main(;
 
     ## solve problem
     @info "Solving..."
-    solve!(problem, sol, C; rhs = f!, use_iterative_solver = use_iterative_solver)
+    solve!(problem, sol, C; rhs = (f!), use_iterative_solver = use_iterative_solver)
 
     ## compute exact error (by MC sampling)
-    weightederrorH1, weightederrorL2, uniformerrorH1, uniformerrorL2 = calculate_sampling_error(sol, C; problem = problem, rhs = f!, order = order + 1, nsamples = 50, debug)
+    weightederrorH1, weightederrorL2, uniformerrorH1, uniformerrorL2 = calculate_sampling_error(sol, C; problem = problem, rhs = (f!), order = order + 1, nsamples, debug)
 
     ## plot solution
     if !isnothing(Plotter)
