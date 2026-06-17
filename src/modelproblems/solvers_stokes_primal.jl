@@ -13,7 +13,7 @@ struct StokesPrimal{Tv, MT, VT, GT}
 end
 
 struct StokesPrimalPreconditioner{Tv, FAC}
-    LUA::FAC
+    LUS::FAC
     DA::Array{Tv, 1}
     temp::Array{Tv, 1}
     bdofs::Vector{Int}
@@ -22,6 +22,11 @@ struct StokesPrimalPreconditioner{Tv, FAC}
 end
 
 function stokesPrimalPreconditioner(A0::ExtendableSparseMatrix{Tv, Ti}, B::ExtendableSparseMatrix{Tv, Ti}, bdofs, nmodes, vsize) where {Tv, Ti}
+    #for dof in bdofs
+    #    A0[dof, dof] = 1.0e60
+    #end
+    flush!(A0)
+
     DA::Array{Tv, 1} = zeros(Tv, size(A0, 1))
     for j in 1:length(DA)
         DA[j] = A0[j, j]
@@ -38,7 +43,6 @@ function stokesPrimalPreconditioner(A0::ExtendableSparseMatrix{Tv, Ti}, B::Exten
         for r in nzrange(cscmat, i), r2 in nzrange(cscmat, j)
             if rows[r] == rows[r2]
                 row = rows[r]
-                #@info "DA[row] = ", DA[row]
                 value = valsB[r] * valsB[r2] / DA[row]
                 _addnz(S, i, j, value, 1)
             end
@@ -48,24 +52,19 @@ function stokesPrimalPreconditioner(A0::ExtendableSparseMatrix{Tv, Ti}, B::Exten
     # compute LU factorisation of S
     flush!(S)
     LUS = lu(S.cscmatrix)
-
-    # compute LU factorisation of S
-    for dof in bdofs
-        A0[dof, dof] = 1.0e60
-    end
-    flush!(A0)
-    LUA = lu(A0.cscmatrix)
+    #LUA = lu(A0.cscmatrix)
 
     # temporary storage array for solver
     temp = zeros(Tv, size(B, 2))
 
-    return StokesPrimalPreconditioner{Tv, typeof(LUA)}(LUA, DA, temp, bdofs, nmodes, vsize)
+    return StokesPrimalPreconditioner{Tv, typeof(LUS)}(LUS, DA, temp, bdofs, nmodes, vsize)
 end
 
 @inline LinearAlgebra.ldiv!(C::StokesPrimalPreconditioner, b) = ldiv!(b, C, b)
 @inline function LinearAlgebra.ldiv!(y, C::StokesPrimalPreconditioner{Tv, FAC}, b) where {Tv, FAC}
     a::Int = 0
     c::Int = 0
+    DA::Array{Tv, 1} = C.DA
     temp::Array{Tv, 1} = C.temp
     nmodes::Int = C.nmodes
     vsize::Array{Int, 1} = C.vsize
@@ -73,11 +72,15 @@ end
         # upper left block of preconditioner (I ⊗ A_diag)
         a = (mu - 1) * vsize[1] + 1
         c = mu * vsize[1]
+        for i in a:c
+            y[i] = b[i] / DA[i - a + 1]
+        end
+        a = nmodes * vsize[1] + (mu - 1) * vsize[2] + 1
+        c = nmodes * vsize[1] + mu * vsize[2]
         if y !== b
-            ldiv!(view(y, a:c), C.LUA, view(b, a:c))
+            ldiv!(view(y, a:c), C.LUS, view(b, a:c))
         else
-            temp = zeros(Tv, vsize)
-            ldiv!(temp, C.LUA, view(b, a:c))
+            ldiv!(temp, C.LUS, view(b, a:c))
             y[a:c] .= temp
         end
     end
@@ -178,6 +181,15 @@ function solve_stokes_primal!(SolutionSGFEM::SGFEVector, A0, A, B, b0, G, nmodes
     SolutionSGFEM.entries .= x
     @show history
 
+    ## Pressure mean von pressure modes abziehen, damit Vorfaktor wie bei use_iterative_solver=false ist.
+    ## https://wias-pdelib.github.io/ExtendableFEM.jl/stable/module_examples/Example252_NSEPlanarLatticeFlow/
+    xgrid = SolutionSGFEM[1].FES.xgrid
+    for i in 1:nmodes
+        pintegrate = ItemIntegrator([id(1)])
+        pmean = sum(ExtendableFEM.evaluate(pintegrate, [SolutionSGFEM.FEVectorBlocks[nmodes + i]])) / sum(xgrid[CellVolumes])
+        view(SolutionSGFEM.FEVectorBlocks[nmodes + i]) .-= pmean
+    end
+
     ## check residual
     Ax = zero(SolutionSGFEM.entries)
     mul!(Ax, S, SolutionSGFEM.entries)
@@ -234,6 +246,13 @@ function solve_stokes_primal_full!(SolutionSGFEM::SGFEVector, A0, A, B, b0, G, n
 
     @info "Solving StochasticFEM with full matrix..."
     SolutionSGFEM.entries .= bigS.entries \ bigb.entries
+
+    xgrid = SolutionSGFEM[1].FES.xgrid
+    for i in 1:nmodes
+        pintegrate = ItemIntegrator([id(1)])
+        pmean = sum(ExtendableFEM.evaluate(pintegrate, [SolutionSGFEM.FEVectorBlocks[nmodes + i]])) / sum(xgrid[CellVolumes])
+        view(SolutionSGFEM.FEVectorBlocks[nmodes + i]) .-= pmean
+    end
 
     residual = bigS.entries * SolutionSGFEM.entries .- bigb.entries
     for m in 1:nmodes

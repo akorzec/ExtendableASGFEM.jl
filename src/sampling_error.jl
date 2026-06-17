@@ -240,3 +240,5 @@ function calculate_sampling_error(
 
     return totalerrorL2stress_weighted, totalerrorL2u_weighted, totalerrorL2stress_uniform, totalerrorL2u_uniform
 end
+
+# Beim Druckfehler Integral Mittelwert beachten!!!
