@@ -89,6 +89,8 @@ export StokesProblemPrimal
 
 include("sampling_error.jl")
 export calculate_sampling_error
+export calculate_sampling_error_2
+export u_with_stress_metric_configuration, stokes_metrics_configuration
 
 include("estimate.jl")
 export estimate

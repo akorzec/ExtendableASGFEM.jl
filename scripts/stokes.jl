@@ -33,12 +33,6 @@ function main(;
     )
     ## prepare stochastic coefficient
     C = StochasticCoefficientCosinus(; τ = 0.9, decay = decay, mean = mean)
-    """result = zeros(1)
-    for i in 1:10
-        a! = get_a!(C)
-        a!(result, [0.3, 0.3], rand(Float64, 10))
-        @info "sampled = ", result[1]
-    end"""
 
     ## prepare grid
     xgrid = if domain == "square"
@@ -69,18 +63,21 @@ function main(;
     @info "Solving..."
     solve!(problem, sol, C; rhs = (f!), use_iterative_solver = use_iterative_solver)
 
-    ## compute exact error (by MC sampling)
-    weightederrorH1, weightederrorL2, uniformerrorH1, uniformerrorL2 = calculate_sampling_error(sol, C; problem = problem, rhs = (f!), order = order + 1, nsamples, debug)
-
     ## plot solution
     if !isnothing(Plotter)
         p = plot_modes(sol; Plotter = Plotter, ncols = 4)
         display(p)
     end
 
+    ## compute exact error (by MC sampling)
+    weightederrorH1, weightederrorL2u, weightederrorL2p, uniformerrorH1, uniformerrorL2u, uniformerrorL2p = calculate_sampling_error_2(
+        sol, C; problem = problem, metrics_configurations = stokes_metrics_configuration, rhs = (f!), order = order + 1, nsamples, debug
+    )
+
     @info "RESULTS
         || ∇(u-u_h) || (w,u) = $(sqrt(weightederrorH1[end])), $(sqrt(uniformerrorH1[end]))
-        || u - u_h || (w,u) = $(sqrt(weightederrorL2[end])), $(sqrt(uniformerrorL2[end]))"
+        || u - u_h || (w,u) = $(sqrt(weightederrorL2u[end])), $(sqrt(uniformerrorL2u[end]))
+        || p - p_h || (w,u) = $(sqrt(weightederrorL2p[end])), $(sqrt(uniformerrorL2p[end]))"
 
     return sol
 end

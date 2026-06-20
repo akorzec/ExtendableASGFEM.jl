@@ -47,7 +47,7 @@ function data_error_u(::Union{Type{<:PoissonProblemPrimal}, Type{<:LogTransforme
         result[1] = (input[1] - input[2])^2
         return nothing
     end
-    return closure, [id(1), id(2)], [(1, 2), (2, 2)]
+    return closure, [id(1), id(2)], [(1, 2), (2, 1)]
 end
 
 function data_error_u(::Type{<:LogTransformedPoissonProblemDual}, dim, C::AbstractStochasticCoefficient, sample_pointer)
@@ -66,10 +66,44 @@ function data_error_u(::Type{<:StokesProblemPrimal}, dim, C::AbstractStochasticC
     return closure, [id(1), id(2)], [(1, 1), (2, 1)]
 end
 
+function data_error_p(::Type{<:StokesProblemPrimal}, dim, C::AbstractStochasticCoefficient, sample_pointer)
+    function closure(result, input, qpinfo)
+        result[1] = (input[1] - input[2])^2
+        return nothing
+    end
+    return closure, [id(1), id(2)], [(1, 2), (2, 2)]
+end
+
 FES4sampling(::Type{PoissonProblemPrimal}, dim, xgrid, order) = [FESpace{H1Pk{1, dim, order}}(xgrid)]
 FES4sampling(::Type{LogTransformedPoissonProblemPrimal}, dim, xgrid, order) = [FESpace{H1Pk{1, dim, order}}(xgrid)]
 FES4sampling(::Type{LogTransformedPoissonProblemDual}, dim, xgrid, order) = [FESpace{HDIVRTk{dim, order}}(xgrid), FESpace{H1Pk{1, dim, order}}(xgrid; broken = true)]
 FES4sampling(::Type{StokesProblemPrimal}, _, xgrid, order) = [FESpace{H1BR{2}}(xgrid), FESpace{L2P0{1}}(xgrid)]
+
+u_with_stress_metric_configuration = [
+    Dict(
+        "name" => "L2stress",
+        "closure" => data_error_stress,
+    ),
+    Dict(
+        "name" => "L2u",
+        "closure" => data_error_u,
+    ),
+]
+
+stokes_metrics_configuration = [
+    Dict(
+        "name" => "L2stress",
+        "closure" => data_error_stress,
+    ),
+    Dict(
+        "name" => "L2u",
+        "closure" => data_error_u,
+    ),
+    Dict(
+        "name" => "L2p",
+        "closure" => data_error_p,
+    ),
+]
 
 """
 $(TYPEDSIGNATURES)
@@ -241,4 +275,115 @@ function calculate_sampling_error(
     return totalerrorL2stress_weighted, totalerrorL2u_weighted, totalerrorL2stress_uniform, totalerrorL2u_uniform
 end
 
-# Beim Druckfehler Integral Mittelwert beachten!!!
+function calculate_sampling_error_2(
+        SolutionSGFEM::SGFEVector,
+        C::AbstractStochasticCoefficient;
+        metrics_configurations = u_with_stress_metric_configuration,
+        problem = LogTransformedPoissonProblemPrimal,
+        bonus_quadorder_a = 10,
+        bonus_quadorder_f = 0,
+        order = 2,
+        rhs = nothing,
+        dim = size(SolutionSGFEM.FES_space[1].xgrid[Coordinates], 1),
+        Msamples = maxm(C),
+        parallel_sampling = true,
+        dimensionwise_error = true,
+        energy_norm = true,
+        debug = false,
+        nsamples = 100
+    )
+
+    nthreads = Threads.nthreads()
+    @info "Estimating exact error by MC sampling (with nthreads = $nthreads)"
+    FES = SolutionSGFEM.FES_space
+    xgrid = FES[1].xgrid
+    sol_sgfem = SolutionSGFEM.FEV
+    TensorBasis = SolutionSGFEM.TB
+    multi_indices::Array{Array{Int, 1}, 1} = TensorBasis.multi_indices
+    M::Int = maxlength_multiindices(TensorBasis)
+    nmodes = num_multiindices(TensorBasis)
+
+    ## generate samples
+    Samples, weights = sample_distribution(TensorBasis, nsamples; M = Msamples, Mweights = Msamples)
+
+    ## prepare array with deterministic solutions
+    sol_det = Array{FEVector, 1}(undef, nsamples)
+
+    ## compute deterministic solutions (in parallel)
+    Threads.@threads for s in 1:nsamples
+
+        ## deterministic problem description
+        PD, u = deterministic_problem(problem, C, Samples[:, s]; rhs = rhs, bonus_quadorder_a = bonus_quadorder_a, bonus_quadorder_f = bonus_quadorder_f)
+
+        ## solve problem for the current sample
+        FESSampling = FES4sampling(problem, dim, xgrid, order)
+        sol_det[s] = ExtendableFEM.solve(PD, FESSampling; verbosity = debug ? 0 : -1, timeroutputs = :none)
+        print(".")
+    end
+    println(" MC samples solved")
+
+    ## compute errors for each sample (sequentially)
+    M0 = dimensionwise_error ? 0 : M
+    error_per_run = Dict()
+    metrics = []
+    csample = Samples[:, 1]
+    metric_names = [configuration["name"] for configuration in metrics_configurations]
+    for configuration in metrics_configurations
+        kernel!, input, ids = configuration["closure"](problem, dim, C, csample)
+        push!(
+            metrics,
+            Dict(
+                "name" => configuration["name"],
+                "ids" => ids,
+                "integrator" => ItemIntegrator(kernel!, input; resultdim = dim, quadorder = 2 * order),
+                "solution" => Array{FEVectorBlock, 1}(undef, 2),
+            ),
+        )
+        error_per_run[configuration["name"]] = zeros(Float64, M + 1, nsamples)
+    end
+
+    for s in 1:nsamples
+        csample = Samples[:, s]
+        for metric in metrics
+            for entry in metric["ids"]
+                if entry[1] == 1
+                    metric["solution"][1] = sol_det[s][entry[2]]
+                else
+                    metric["solution"][2] = sol_sgfem[entry[2]]
+                end
+            end
+        end
+
+        for m in M0:M
+            set_sample!(SolutionSGFEM, view(csample, 1:m))
+            for metric in metrics
+                sol = ExtendableFEM.evaluate(metric["integrator"], metric["solution"])
+                error_per_run[metric["name"]][m + 1, s] = sum(view(sol, 1, :)) # Hier Abweichung: Keine Abhängigkeit von energy_norm!
+            end
+        end
+
+        @info "SAMPLE $s of $nsamples
+            sample = $(view(csample, 1:min(Msamples, 2 * M)))
+            weight = $(weights[s])
+            $(join(map(name -> "error($name) = $(error_per_run[name][end, s])", metric_names), "\n            "))"
+    end
+
+    error = Dict()
+    weightsum = sum(weights)
+    for name in metric_names
+        name_weighted = "$(name)_weighted"
+        name_uniform = "$(name)_uniform"
+        error[name_weighted] = zeros(Float64, M + 1)
+        error[name_uniform] = zeros(Float64, M + 1)
+        for s in 1:nsamples
+            error[name_uniform] .+= view(error_per_run[name], :, s)
+            error[name_weighted] .+= view(error_per_run[name], :, s) * weights[s]
+        end
+        for m in 1:(M + 1)
+            error[name_uniform][m] /= nsamples
+            error[name_weighted][m] /= weightsum
+        end
+    end
+
+    return [error["$(name)_weighted"] for name in metric_names]..., [error["$(name)_uniform"] for name in metric_names]...
+end
