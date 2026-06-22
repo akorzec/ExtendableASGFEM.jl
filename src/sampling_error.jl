@@ -1,5 +1,5 @@
 ## kernel for L2 error of stress, i.e || grad(u) - grad(u_h) ||
-function data_error_stress(::Union{Type{<:PoissonProblemPrimal}, Type{<:LogTransformedPoissonProblemPrimal}}, dim, C::AbstractStochasticCoefficient, sample_pointer)
+function data_error_stress(::Type{<:PoissonProblemPrimal}, dim, C::AbstractStochasticCoefficient, sample_pointer)
     function closure(result, input, qpinfo)
         result[1] = 1
         if dim == 1
@@ -47,7 +47,7 @@ function data_error_u(::Union{Type{<:PoissonProblemPrimal}, Type{<:LogTransforme
         result[1] = (input[1] - input[2])^2
         return nothing
     end
-    return closure, [id(1), id(2)], [(1, 2), (2, 1)]
+    return closure, [id(1), id(2)], [(1, 1), (2, 1)]
 end
 
 function data_error_u(::Type{<:LogTransformedPoissonProblemDual}, dim, C::AbstractStochasticCoefficient, sample_pointer)
@@ -55,7 +55,7 @@ function data_error_u(::Type{<:LogTransformedPoissonProblemDual}, dim, C::Abstra
         result[1] = (input[1] - input[2])^2
         return nothing
     end
-    return closure, [id(1), id(2)], [(1, 1), (2, 1)]
+    return closure, [id(1), id(2)], [(1, 2), (2, 1)]
 end
 
 function data_error_u(::Type{<:StokesProblemPrimal}, dim, C::AbstractStochasticCoefficient, sample_pointer)

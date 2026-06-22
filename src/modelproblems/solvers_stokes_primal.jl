@@ -25,7 +25,7 @@ function stokesPrimalPreconditioner(A0::ExtendableSparseMatrix{Tv, Ti}, B::Exten
     #for dof in bdofs
     #    A0[dof, dof] = 1.0e60
     #end
-    flush!(A0)
+    #flush!(A0)
 
     DA::Array{Tv, 1} = zeros(Tv, size(A0, 1))
     for j in 1:length(DA)
@@ -193,7 +193,9 @@ function solve_stokes_primal!(SolutionSGFEM::SGFEVector, A0, A, B, b0, G, nmodes
     ## check residual
     Ax = zero(SolutionSGFEM.entries)
     mul!(Ax, S, SolutionSGFEM.entries)
-    return @info "solver residual = $(sqrt(sum((Ax - b.entries) .^ 2)))"
+    @info "solver residual = $(sqrt(sum((Ax - b.entries) .^ 2)))"
+
+    return bdofs
 end
 
 function solve_stokes_primal_full!(SolutionSGFEM::SGFEVector, A0, A, B, b0, G, nmodes, rhsfac)
@@ -258,7 +260,7 @@ function solve_stokes_primal_full!(SolutionSGFEM::SGFEVector, A0, A, B, b0, G, n
     for m in 1:nmodes
         residual[FES[1].ndofs * (m - 1) .+ bdofs] .= 0
     end
-
     println("linear residual = $(sqrt(sum(residual .^ 2)))")
-    return []
+
+    return bdofs
 end

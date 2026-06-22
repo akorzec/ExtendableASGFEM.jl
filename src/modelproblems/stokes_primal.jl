@@ -1,6 +1,6 @@
 """
 
-Stokes problem with linear stochastic coefficient ``a`` that seeks ``u`` such that
+Stokes problem with linear stochastic coefficient ``ν`` that seeks ``(u, p)`` such that
 
 ``-\\nu\\Delta u + \\nabla p = f \\quad \\text{for } (y,x) \\in \\Gamma \\times D``
 ``-\\nu\\mathrm{div} u = 0 \\quad \\text{for } (y,x) \\in \\Gamma \\times D``

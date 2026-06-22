@@ -1,6 +1,7 @@
 # Folders
 data
 .CondaPkg
+plots
 
 # Files
 Manifest.toml
