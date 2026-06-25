@@ -77,7 +77,7 @@ end
 FES4sampling(::Type{PoissonProblemPrimal}, dim, xgrid, order) = [FESpace{H1Pk{1, dim, order}}(xgrid)]
 FES4sampling(::Type{LogTransformedPoissonProblemPrimal}, dim, xgrid, order) = [FESpace{H1Pk{1, dim, order}}(xgrid)]
 FES4sampling(::Type{LogTransformedPoissonProblemDual}, dim, xgrid, order) = [FESpace{HDIVRTk{dim, order}}(xgrid), FESpace{H1Pk{1, dim, order}}(xgrid; broken = true)]
-FES4sampling(::Type{StokesProblemPrimal}, _, xgrid, order) = [FESpace{H1BR{2}}(xgrid), FESpace{L2P0{1}}(xgrid)]
+FES4sampling(::Type{StokesProblemPrimal}, _, xgrid, order) = [FESpace{H1P2B{2, 2}}(xgrid), FESpace{L2P1{1}}(xgrid)]
 
 u_with_stress_metric_configuration = [
     Dict(

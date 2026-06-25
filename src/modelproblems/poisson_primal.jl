@@ -18,7 +18,6 @@ function deterministic_problem(::Type{PoissonProblemPrimal}, C::AbstractStochast
 
     function kernel_diffusion_a!(result, input, qpinfo)
         a!(result, qpinfo.x, sample_pointer)
-        @info "sampled = ", result[1]
         result .= result[1] * input
         return nothing
     end

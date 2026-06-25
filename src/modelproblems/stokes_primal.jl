@@ -10,21 +10,13 @@ abstract type StokesProblemPrimal <: AbstractModelProblem end
 
 include("solvers_stokes_primal.jl")
 
-function exact_u!(result, qpinfo)
-    x = qpinfo.x[1]
-    y = qpinfo.x[2]
-    result[1] = -2(x^2) * ((-1 + x)^2) * y * ((-1 + y)^2) - 2(x^2) * ((-1 + x)^2) * (-1 + y) * (y^2)
-    return result[2] = 2(-1 + x) * (x^2) * (y^2) * ((-1 + y)^2) + 2x * ((-1 + x)^2) * (y^2) * ((-1 + y)^2)
-end
-
 ## deterministic problem description
 function deterministic_problem(::Type{StokesProblemPrimal}, C::AbstractStochasticCoefficient, sample_pointer; (get_a!) = (get_a!), rhs = nothing, bonus_quadorder_a = 2, bonus_quadorder_f = 0)
     get_ν! = get_a!(C)
 
     function stokes_kernel!(result, input, qpinfo)
-        ν = zeros(1) #[10^-3])
+        ν = zeros(1)
         get_ν!(ν, qpinfo.x, sample_pointer)
-        #@info "sampled ν = ", ν[1]
         result[1] = ν[1] * input[1] - input[5]
         result[2] = ν[1] * input[2]
         result[3] = ν[1] * input[3]
@@ -40,10 +32,9 @@ function deterministic_problem(::Type{StokesProblemPrimal}, C::AbstractStochasti
     assign_unknown!(PD, p)
     assign_operator!(PD, BilinearOperator(stokes_kernel!, [grad(u), id(p)]; bonus_quadorder = bonus_quadorder_a))
     if rhs !== nothing
-        # [apply(u, Reconstruct{HDIVRT0{2},Identity})]
-        assign_operator!(PD, LinearOperator(rhs, [id(u)]; bonus_quadorder = bonus_quadorder_f))
+        # TODO: Define reconstruct::Bool switch for reconstruction operator
+        assign_operator!(PD, LinearOperator(rhs, [apply(u, Reconstruct{HDIVRT1{2}, Identity})]; bonus_quadorder = bonus_quadorder_f))
     end
-    #assign_operator!(PD, ExtendableFEM.InterpolateBoundaryData(u, exact_u!; regions=1:4, bonus_quadorder=5))
     assign_operator!(PD, HomogeneousBoundaryData(u; regions = 1:4))
     assign_restriction!(PD, ZeroMeanValueRestriction(p))
 
@@ -68,6 +59,7 @@ function solve!(
     A0 = FEMatrix(FES[1])
     assemble!(A0, BilinearOperator(get_am_x(0, C), [grad(1)], [grad(1)]; bonus_quadorder = bonus_quadorder_a))
     A = []
+
     for m in 1:maxlength_multiindices(TB)
         Am = FEMatrix(FES[1])
         assemble!(Am, BilinearOperator(get_am_x(m, C), [grad(1)], [grad(1)]; bonus_quadorder = bonus_quadorder_a))
@@ -81,7 +73,7 @@ function solve!(
     ## assemble right-hand side (f, v)
     if rhs !== nothing
         b0 = FEVector(FES[1])
-        assemble!(b0, LinearOperator(rhs, [id(1)]; bonus_quadorder = bonus_quadorder_f))
+        assemble!(b0, LinearOperator(rhs, [apply(1, Reconstruct{HDIVRT0{2}, Identity})]; bonus_quadorder = bonus_quadorder_f))
     else
         @error "need right-hand side"
     end

@@ -37,6 +37,9 @@ function f!(result, qpinfo)
     #result[1] = 1000 * (1 - x) * x * y * (1 - y)
     #result[2] = 1000 * (1 - x) * x * y * (1 - y)
     #result[1] = sin(x) * sin(y) * cos(pi * x / 2) * cos(pi * y / 2)
+    #ξ = x^2 * (x - 1)^2 * y^2 * (y - 1)^2
+    #result[1] = - (1 / 6) * x^3
+    #result[2] = (1 / 6) * y^3
     return nothing
 end
 
@@ -64,7 +67,7 @@ default_args = Dict(
     "order" => 1,
     "problem" => StokesProblemPrimal,
     "C" => StochasticCoefficientCosinus,
-    "decay" => 2.0,
+    "decay" => 1000,
     "mean" => 1.0,
     "maxm" => 150,
     "bonus_quadorder_a" => 2,

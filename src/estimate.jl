@@ -218,7 +218,6 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
     return eta4modes, eta4cell, multi_indices_extended #, f4modes
 end
 
-
 function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = 5)
 
     FES = sol.FES_space[1]
@@ -401,7 +400,7 @@ function estimate(::Type{StokesProblemPrimal}, sol::SGFEVector, C::AbstractStoch
     actives = union(active_int, active_bnd)
     for j in 1:length(nmodes_extended)
         if j in actives
-            eta4modes[j] = lvl % 2 == 0 ? 0 : 10000
+            eta4modes[j] = 10000
         end
     end
     global lvl += 1

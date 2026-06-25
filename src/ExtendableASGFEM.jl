@@ -10,8 +10,8 @@ using ExtendableFEM: ExtendableFEM, BilinearOperator, FaceInterpolator,
     assign_unknown!, div, grad, id, jump, plot
 using ExtendableFEMBase: ExtendableFEMBase, BFaceDofs, CellDofs, Divergence,
     FEEvaluator, FEMatrix, FESpace, FEVector,
-    FEVectorBlock, Gradient, H1P1, H1Pk, HDIVRT0, HDIVRTk, H1BR, Identity, L2P0,
-    Laplacian, QuadratureRule, _addnz, addblock!,
+    FEVectorBlock, Gradient, H1P1, H1Pk, H1P2B, L2P1, HDIVRT0, HDIVRT1, HDIVRTk,
+    H1BR, Identity, L2P0, Laplacian, QuadratureRule, _addnz, addblock!,
     addblock_matmul!, eval_febe!, fill!, get_ndofs,
     get_polynomialorder, unicode_scalarplot,
     update_basis!
