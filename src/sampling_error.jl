@@ -292,8 +292,6 @@ function calculate_sampling_error_2(
     end
     println(" MC samples solved")
 
-    ExtendableFEM.plot([id(1), id(2)], sol_det[end]; Plotter = PythonPlot)
-
     ## compute errors for each sample (sequentially)
     M0 = dimensionwise_error ? 0 : M
     error_per_run = Dict()

@@ -7,7 +7,17 @@ using ExtendableGrids
 using GridVisualize
 using Symbolics
 
-function prepare_data()
+function prepare_data_example_1()
+    @variables x1, x2
+
+    u = [0, (1 / 2) * (1 - x1^2)]
+    eval_u! = build_function(u, x1, x2, expression = Val{false})[2]
+
+    return (result, _) -> (result .= 0),
+        (result, qpinfo) -> (eval_u!(result, qpinfo.x...))
+end
+
+function prepare_data_example_2()
     @variables x1, x2
 
     u = [0, (1 / 2) * (1 - x1^2)]
@@ -22,22 +32,29 @@ function main(;
         nrefs = 3,                      ## number of uniform refinements of the initial grid
         order = 2,                      ## polynomial order of the FEspaces
         domain = "square",              ## domain, e.g., "square" or "lshape"
+        shift = [-0.5, -0.5],           ## shift argument for domain
+        scale = [2, 2],                 ## scale argument for domain
         modes = [[0], [1]],             ## initial multi-indices for stochastic basis
         use_iterative_solver = true,    ## use iterative solver? (otherwise direct)
         nsamples = 50,
         Plotter = nothing,
     )
-    ## prepare stochastic coefficient
-    C = StochasticCoefficientConstants()
-
     ## prepare grid
     (xgrid, boundary_regions) = if domain == "square"
-        (uniform_refine(grid_unitsquare(Triangle2D), nrefs), 1:4)
+        (uniform_refine(grid_unitsquare(Triangle2D, shift = shift, scale = scale), nrefs), 1:4)
     elseif domain == "lshape"
-        (uniform_refine(grid_lshape(Triangle2D), nrefs), 1:8)
+        (uniform_refine(grid_lshape(Triangle2D, shift = shift, scale = scale), nrefs), 1:8)
     else
         error("unknown domain: $domain")
     end
+
+    ## prepare FE spaces
+    FETypes = (H1BR{2}, L2P0{1})
+    FES = [FESpace{FETypes[1]}(xgrid), FESpace{FETypes[2]}(xgrid)]
+    unames = ["u", "p"]
+
+    ## prepare stochastic coefficient
+    C = StochasticCoefficientConstants()
 
     ## prepare stochastic basis
     multi_indices = Array{Array{Int, 1}, 1}(modes)
@@ -45,16 +62,13 @@ function main(;
     M = maximum(length.(multi_indices))
     OBType = LegendrePolynomials
     ansatz_deg = maximum([maximum(multi_indices[k]) for k in 1:length(multi_indices)]) + 4
-    TensorBasis = TensorizedBasis(OBType, M, ansatz_deg, 2 * ansatz_deg, 2 * ansatz_deg, multi_indices = multi_indices)
+    TensorBasis = TensorizedBasis(
+        OBType, M, ansatz_deg, 2 * ansatz_deg, 2 * ansatz_deg, multi_indices = multi_indices
+    )
 
     ## prepare synthetic problem data
-    f!, exact_u! = prepare_data()
+    f!, exact_u! = prepare_data_example_1()
     bonus_quadorder_f = 2
-
-    ## prepare FE spaces
-    FETypes = (H1BR{2}, L2P0{1})
-    FES = [FESpace{FETypes[1]}(xgrid), FESpace{FETypes[2]}(xgrid)]
-    unames = ["u", "p"]
 
     ## create solution vector
     sol = SGFEVector(FES, TensorBasis; active_modes = 1:length(multi_indices), unames)

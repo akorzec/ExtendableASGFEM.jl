@@ -81,13 +81,16 @@ function solve!(
     TB = sol.TB
 
     ## Laplacian: A = (a∇u,∇v) with building blocks Am = (a_m∇u,∇v)
-    A0 = FEMatrix(FES[1])
-    assemble!(A0, BilinearOperator(get_am_x(0, C), [grad(1)], [grad(1)]; bonus_quadorder = bonus_quadorder_a))
     A = []
-
-    for m in 1:maxlength_multiindices(TB)
+    for m in 0:maxlength_multiindices(TB)
         Am = FEMatrix(FES[1])
-        assemble!(Am, BilinearOperator(get_am_x(m, C), [grad(1)], [grad(1)]; bonus_quadorder = bonus_quadorder_a))
+        assemble!(
+            Am,
+            BilinearOperator(
+                get_am_x(m, C), [grad(1)], [grad(1)];
+                bonus_quadorder = bonus_quadorder_a, #factor=2/sqrt(2)
+            )
+        )
         push!(A, Am)
     end
 
@@ -128,7 +131,7 @@ function solve!(
         use_iterative_solver
             ? solve_stokes_primal!
             : solve_stokes_primal_full!
-    )(sol, A0, A, B, b0, G, nmodes, bdofs)
+    )(sol, A[1], A[2:end], B, b0, G, nmodes, bdofs)
 
     return bdofs
 end
