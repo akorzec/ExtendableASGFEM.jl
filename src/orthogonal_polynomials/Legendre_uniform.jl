@@ -1,7 +1,7 @@
 """
 $(TYPEDEF)
 
-Type for dispatching Legendre polynomials, which are orthogonal with respect to the uniform distribution on [-1, 1].
+Type for dispatching Legendre polynomials, which are orthogonal with respect to the uniform distribution on [-1, 1], i.e., the weight function `w = 0.5`.
 """
 abstract type LegendrePolynomials <: OrthogonalPolynomialType end
 
@@ -10,12 +10,14 @@ $(TYPEDSIGNATURES)
 
 Returns the recurrence coefficients `(a, b, c)` for the k-th Legendre polynomial, corresponding to the three-term recurrence relation:
 
-    P_{k+1}(x) = (a_k x - b_k) P_k(x) - c_k P_{k-1}(x)
+    P_{k}(x) = (a_k x - b_k) P_{k-1}(x) - c_k P_{k-2}(x)
 
 For Legendre polynomials:
 - `a = 0`
 - `b = (2k + 1) / (k + 1)`
 - `c = k / (k + 1)`
+- `P_{-1} = 0`
+- `P_0 = 1`
 """
 recurrence_coefficients(::Type{LegendrePolynomials}, k::Integer) =
     0, (2 * k + 1) // (k + 1), k // (k + 1)
@@ -27,9 +29,9 @@ $(TYPEDSIGNATURES)
 
 Returns the norm of the k-th Legendre polynomial, i.e.,
 
-    ||P_k|| = sqrt(2 / (2k + 1))
+    ||P_k|| = sqrt(2 / (2k + 1)) / sqrt(2)
 """
-norms(::Type{LegendrePolynomials}, k) = sqrt(2 / (2 * k + 1))
+norms(::Type{LegendrePolynomials}, k) = sqrt(2 / (2 * k + 1)) / sqrt(2)
 
 """
 $(TYPEDSIGNATURES)
