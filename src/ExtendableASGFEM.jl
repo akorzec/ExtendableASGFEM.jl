@@ -10,7 +10,7 @@ using ExtendableFEM: ExtendableFEM, BilinearOperator, FaceInterpolator,
     assign_unknown!, div, grad, id, jump, plot, InterpolateBoundaryData
 using ExtendableFEMBase: ExtendableFEMBase, BFaceDofs, CellDofs, Divergence,
     FEEvaluator, FEMatrix, FESpace, FEVector,
-    FEVectorBlock, Gradient, H1P1, H1Pk, H1P2B, L2P1, HDIVRT0, HDIVRT1, HDIVRTk,
+    FEVectorBlock, Gradient, H1P1, H1P2, H1Pk, H1P2B, L2P1, HDIVRT0, HDIVRT1, HDIVRTk,
     H1BR, Identity, L2P0, Laplacian, QuadratureRule, _addnz, addblock!,
     addblock_matmul!, eval_febe!, fill!, get_ndofs, ON_BFACES,
     get_polynomialorder, unicode_scalarplot,
@@ -91,9 +91,12 @@ export PoissonProblemPrimal
 export StokesProblemPrimal
 
 include("sampling_error.jl")
+export u_with_stress_metric_configuration, stokes_metrics_configuration
+export sample_reference_solution
+export setup_metrics
+export apply_error_integrators_from_metrics!
 export calculate_sampling_error
 export calculate_sampling_error_2
-export u_with_stress_metric_configuration, stokes_metrics_configuration
 
 include("estimate.jl")
 export estimate

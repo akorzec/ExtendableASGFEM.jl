@@ -18,7 +18,7 @@ function deterministic_problem(
         sample_pointer;
         (get_a!) = (get_a!),
         (exact_boundary!) = nothing,
-        reconstruct = true,
+        reconstruct = false,
         boundary_regions = 1:4,
         bonus_quadorder_a = 2,
         bonus_quadorder_f = 0,
@@ -77,6 +77,8 @@ function solve!(
         use_iterative_solver = true,         ## use iterative solver? (otherwise direct)
         reconstruct = false,                 ## apply HDIVRT0{2} reconstruction operator to rhs?
     )
+    @info "Solving..."
+
     FES = sol.FES_space
     TB = sol.TB
 
@@ -94,7 +96,7 @@ function solve!(
         push!(A, Am)
     end
 
-    ## Deterministic B = (∇ ⋅ v, q) term
+    ## Divergence for 0th mode: B = (∇ ⋅ v, q)
     B = FEMatrix(FES[1], FES[2])
     assemble!(B, BilinearOperator([div(1)], [id(1)]; factor = -1))
 

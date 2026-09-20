@@ -1,32 +1,35 @@
 using PythonPlot
 
 function create_squared_l2_dist_closure!(dim = nothing)
-    N = !isnothing(dim) ? dim : trunc(Int, length(input) / 2)
-    return function (result, input, _)
-        return result[1] = sum((input[1:N] - input[(N + 1):(N << 1)]) .^ 2)
+    N = !isnothing(dim) ? dim : trunc(Int, length(input) >> 1)
+    return function (sample_pointer)
+        return function (result, input, _)
+            result[1] = sum((input[1:N] - input[(N + 1):(N << 1)]) .^ 2)
+            return nothing
+        end
     end
 end
 
 ## kernel for L2 error of stress, i.e || grad(u) - grad(u_h) ||
-function data_error_stress(::Union{Type{<:PoissonProblemPrimal}, Type{<:LogTransformedPoissonProblemPrimal}, Type{<:StokesProblemPrimal}}, dim, C::AbstractStochasticCoefficient, sample_pointer)
+function data_error_stress(::Union{Type{<:PoissonProblemPrimal}, Type{<:LogTransformedPoissonProblemPrimal}, Type{<:StokesProblemPrimal}}, dim)
     return create_squared_l2_dist_closure!(dim), [grad(1), grad(2)], [(1, 1), (2, 1)]
 end
 
-function data_error_stress(::Type{<:LogTransformedPoissonProblemDual}, dim, C::AbstractStochasticCoefficient, sample_pointer)
+function data_error_stress(::Type{<:LogTransformedPoissonProblemDual}, dim)
     return create_squared_l2_dist_closure!(dim), [id(1), id(2)], [(1, 1), (2, 1)]
 end
 
 ## kernel for L2 error || u - u_h ||
-function data_error_u(::Union{Type{<:PoissonProblemPrimal}, Type{<:LogTransformedPoissonProblemPrimal}, Type{<:StokesProblemPrimal}}, dim, C::AbstractStochasticCoefficient, sample_pointer)
+function data_error_u(::Union{Type{<:PoissonProblemPrimal}, Type{<:LogTransformedPoissonProblemPrimal}, Type{<:StokesProblemPrimal}}, dim)
     return create_squared_l2_dist_closure!(dim), [id(1), id(2)], [(1, 1), (2, 1)]
 end
 
-function data_error_u(::Type{<:LogTransformedPoissonProblemDual}, dim, C::AbstractStochasticCoefficient, sample_pointer)
+function data_error_u(::Type{<:LogTransformedPoissonProblemDual}, dim)
     return create_squared_l2_dist_closure!(dim), [id(1), id(2)], [(1, 2), (2, 1)]
 end
 
 ## kernel for L2 error || p - p_h ||
-function data_error_p(::Type{<:StokesProblemPrimal}, dim, C::AbstractStochasticCoefficient, sample_pointer)
+function data_error_p(::Type{<:StokesProblemPrimal}, dim)
     return create_squared_l2_dist_closure!(dim), [id(1), id(2)], [(1, 2), (2, 2)]
 end
 
@@ -151,11 +154,10 @@ function calculate_sampling_error(
 
     ## construct error estimation kernels
     csample = Samples[:, 1]
-    kernel_stress!, input_stress, ids_stress = data_error_stress(problem, dim, C, csample)
-    kernel_u!, input_u, ids_u = data_error_u(problem, dim, C, csample)
-    ErrorIntegratorL2stress = ItemIntegrator(kernel_stress!, input_stress; resultdim = dim, quadorder = 2 * order)
-    ErrorIntegratorL2u = ItemIntegrator(kernel_u!, input_u; quadorder = 2 * order)
-
+    kernel_stress!, input_stress, ids_stress = data_error_stress(problem, dim)
+    kernel_u!, input_u, ids_u = data_error_u(problem, 1)
+    ErrorIntegratorL2stress = ItemIntegrator(kernel_stress!(csample), input_stress; resultdim = dim, quadorder = 2 * order)
+    ErrorIntegratorL2u = ItemIntegrator(kernel_u!(csample), input_u; quadorder = 2 * order)
 
     errorL2stress = zeros(Float64, M + 1, nsamples)
     errorL2stress2 = zeros(Float64, M + 1, nsamples)
@@ -237,36 +239,22 @@ function calculate_sampling_error(
     return totalerrorL2stress_weighted, totalerrorL2u_weighted, totalerrorL2stress_uniform, totalerrorL2u_uniform
 end
 
-function calculate_sampling_error_2(
-        SolutionSGFEM::SGFEVector,
-        rhs!::Function,
+function sample_reference_solution(
+        problem,
+        FESSampling,
+        Samples,
+        rhs!,
+        boundary_regions,
         C::AbstractStochasticCoefficient;
-        metrics_configurations = u_with_stress_metric_configuration,
-        problem = LogTransformedPoissonProblemPrimal,
         (exact_boundary!) = nothing,
-        boundary_regions = 1:4,
-        dim = size(SolutionSGFEM.FES_space[1].xgrid[Coordinates], 1),
+        reconstruct = false,
         bonus_quadorder_a = 2,
-        bonus_quadorder_f = 0,
-        order = 2,
-        Msamples = maxm(C),
-        parallel_sampling = true,
-        dimensionwise_error = true,
-        energy_norm = true,
-        debug = false,
-        nsamples = 100
+        bonus_quadorder_f = 1,
+        nsamples = 100,
+        debug = false
     )
-
     nthreads = Threads.nthreads()
     @info "Estimating exact error by MC sampling (with nthreads = $nthreads)"
-    FES = SolutionSGFEM.FES_space
-    xgrid = FES[1].xgrid
-    sol_sgfem = SolutionSGFEM.FEV
-    TensorBasis = SolutionSGFEM.TB
-    M::Int = maxlength_multiindices(TensorBasis)
-
-    ## generate samples
-    Samples, weights = sample_distribution(TensorBasis, nsamples; M = Msamples, Mweights = Msamples)
 
     ## prepare array with deterministic solutions
     sol_det = Array{FEVector, 1}(undef, nsamples)
@@ -281,56 +269,82 @@ function calculate_sampling_error_2(
             Samples[:, s];
             exact_boundary!,
             boundary_regions,
+            reconstruct,
             bonus_quadorder_a,
-            bonus_quadorder_f
+            bonus_quadorder_f,
         )
 
-        ## solve problem for the current sample
-        FESSampling = FES4sampling(problem, dim, xgrid, order)
         sol_det[s] = ExtendableFEM.solve(PD, FESSampling; verbosity = debug ? 0 : -1, timeroutputs = :none)
         print(".")
     end
     println(" MC samples solved")
 
-    ## compute errors for each sample (sequentially)
-    M0 = dimensionwise_error ? 0 : M
-    error_per_run = Dict()
+    return sol_det
+end
+
+function setup_metrics(problem, metrics_configuration; order = 2)
+    ## collect metrics from metrics_configuration in a single list
     metrics = []
-    csample = Samples[:, 1]
-    metric_names = [configuration["name"] for configuration in metrics_configurations]
-    for configuration in metrics_configurations
-        kernel!, input, ids = configuration["closure"](problem, configuration["dim"], C, csample)
+    for configuration in metrics_configuration
+        kernel_closure, input, ids = configuration["closure"](
+            problem, configuration["dim"]
+        )
+
         push!(
             metrics,
             Dict(
                 "name" => configuration["name"],
                 "ids" => ids,
-                "integrator" => ItemIntegrator(
-                    kernel!, input;
+                "integrator" => (sample_pointer) -> ItemIntegrator(
+                    kernel_closure(sample_pointer), input;
                     resultdim = configuration["dim"], quadorder = 2 * order + 1
                 ),
                 "solution" => Array{FEVectorBlock, 1}(undef, 2),
             ),
         )
-        error_per_run[configuration["name"]] = zeros(Float64, M + 1, nsamples)
     end
 
+    return metrics
+end
+
+function apply_error_integrators_from_metrics!(
+        SolutionSGFEM::SGFEVector,
+        sol_det,
+        metrics,
+        Samples,
+        weights,
+        M,
+        Msamples;
+        dimensionwise_error = true,
+    )
+    sol_sgfem = SolutionSGFEM.FEV
+    M0 = dimensionwise_error ? 0 : M
+    nsamples = size(Samples, 2)
+    metric_names = [metric["name"] for metric in metrics]
+
+    error_per_run = Dict()
+    for metric_name in metric_names
+        error_per_run[metric_name] = zeros(Float64, M + 1, nsamples)
+    end
+
+    nsamples = size(Samples, 2)
     for s in 1:nsamples
-        csample = Samples[:, s]
         for metric in metrics
-            for entry in metric["ids"]
+            for (i, entry) in enumerate(metric["ids"])
                 if entry[1] == 1
-                    metric["solution"][1] = sol_det[s][entry[2]]
+                    metric["solution"][i] = sol_det[s][entry[2]]
                 else
-                    metric["solution"][2] = sol_sgfem[entry[2]]
+                    metric["solution"][i] = sol_sgfem[entry[2]]
                 end
             end
         end
 
+        csample = Samples[:, s]
         for m in M0:M
-            set_sample!(SolutionSGFEM, view(csample, 1:m))
+            y = view(csample, 1:m)
+            set_sample!(SolutionSGFEM, y)
             for metric in metrics
-                sol = ExtendableFEM.evaluate(metric["integrator"], metric["solution"])
+                sol = ExtendableFEM.evaluate(metric["integrator"](y), metric["solution"])
                 error_per_run[metric["name"]][m + 1, s] = sum(view(sol, 1, :)) # Hier Abweichung: Keine Abhängigkeit von energy_norm!
             end
         end
@@ -361,4 +375,48 @@ function calculate_sampling_error_2(
 
     return [error["$(name)_weighted"] for name in metric_names]...,
         [error["$(name)_uniform"] for name in metric_names]...
+end
+
+function calculate_sampling_error_2(
+        SolutionSGFEM::SGFEVector,
+        rhs!::Function,
+        C::AbstractStochasticCoefficient;
+        metrics_configuration = u_with_stress_metric_configuration,
+        problem = LogTransformedPoissonProblemPrimal,
+        (exact_boundary!) = nothing,
+        boundary_regions = 1:4,
+        dim = size(SolutionSGFEM.FES_space[1].xgrid[Coordinates], 1),
+        bonus_quadorder_a = 2,
+        bonus_quadorder_f = 0,
+        order = 2,
+        Msamples = maxm(C),
+        dimensionwise_error = true,
+        energy_norm = true,
+        reconstruct = false,
+        nsamples = 100
+    )
+    FES = SolutionSGFEM.FES_space
+    xgrid = FES[1].xgrid
+    TensorBasis = SolutionSGFEM.TB
+
+    ## generate samples
+    Samples, weights = sample_distribution(
+        TensorBasis, nsamples;
+        M = Msamples, Mweights = Msamples
+    )
+
+    ## calculate MC samples
+    FESSampling = FES4sampling(problem, dim, xgrid, order)
+    sol_det = sample_reference_solution(
+        problem, FESSampling, Samples, rhs!, boundary_regions, C;
+        exact_boundary!, reconstruct, bonus_quadorder_a, bonus_quadorder_f, nsamples
+    )
+
+    metrics = setup_metrics(problem, metrics_configuration; order)
+
+    M = maxlength_multiindices(TensorBasis)
+    return apply_error_integrators_from_metrics!(
+        SolutionSGFEM, sol_det, metrics, Samples, weights, M, Msamples;
+        dimensionwise_error
+    )
 end

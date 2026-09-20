@@ -1,5 +1,3 @@
-# Stochastisches Beispiel mit Null Randdaten
-# Qu & Xu Bsp. 1 nachcoden -> coefficients.jl dazu definieren, an inhomogene Randdaten denken -> Muss implementiert werden
 #=
 
 ([source code](SOURCE_URL))
@@ -33,28 +31,29 @@ using Symbolics
 using UnicodePlots
 
 function prepare_data(C::AbstractStochasticCoefficient, sample_pointer)
-    @variables ν x y
+    @variables x1 x2
 
-    ξ = x^2 * (x - 1)^2 * y^2 * (y - 1)^2
-    ∇ξ = Symbolics.gradient(ξ, [x, y])
+    ξ = x1^2 * (x1 - 1)^2 * x2^2 * (x2 - 1)^2
+    ∇ξ = Symbolics.gradient(ξ, [x1, x2])
     u = [-∇ξ[2], ∇ξ[1]]
-    p = x^5 + y^5 - 1 / 3
-    ∇u = Symbolics.jacobian(u, [x, y])
+    p = x1^5 + x2^5 - 1 / 3
+    ∇u = Symbolics.jacobian(u, [x1, x2])
     Δu = [
-        Symbolics.derivative(∇u[1, 1], x) + Symbolics.derivative(∇u[1, 2], y),
-        Symbolics.derivative(∇u[2, 1], x) + Symbolics.derivative(∇u[2, 2], y),
+        Symbolics.derivative(∇u[1, 1], x1) + Symbolics.derivative(∇u[1, 2], x2),
+        Symbolics.derivative(∇u[2, 1], x1) + Symbolics.derivative(∇u[2, 2], x2),
     ]
-    ∇p = Symbolics.gradient(p, [x, y])
+    ∇p = Symbolics.gradient(p, [x1, x2])
+    ν = 1
     f = -ν * Δu + ∇p
-    eval_f! = build_function(f, ν, x, y, expression = Val{false})[2]
+    curl_f = Symbolics.derivative(f[2], x1) - Symbolics.derivative(f[1], x2)
 
-    get_ν! = get_a!(C)
-    ν = zeros(1)
-    return function (result, qpinfo)
-        get_ν!(ν, qpinfo.x, sample_pointer)
-        eval_f!(result, ν[1], qpinfo.x...)
-        return nothing
+    function map_expression_to_eval_func(expr)
+        compiled = build_function(expr, x1, x2, expression = Val{false})
+        eval_func! = isa(compiled, Tuple) ? compiled[2] : (result, values...) -> (result[1] = compiled(values...))
+        return (result, qpinfo) -> eval_func!(result, qpinfo.x...)
     end
+
+    return map(map_expression_to_eval_func, [f, curl_f])
 end
 
 function filename(data; folder = "data", add = "", makepath = false)
@@ -255,11 +254,10 @@ function _main(
         unames = ["u", "p"]
 
         Samples, _ = sample_distribution(TensorBasis, 2; M = 2, Mweights = 2)
-        f! = isnothing(data["f"]) ? prepare_data(C, Samples) : data["f"]
+        f! = isnothing(data["f"]) ? prepare_data(C, Samples)[1] : data["f"]
 
         sol = SGFEVector(FES, TensorBasis; active_modes = 1:length(multi_indices), unames = unames)
-
-        time_solve = @elapsed bdofs = solve!(problem, sol, C; (rhs!) = (f!), bonus_quadorder_a = bonus_quadorder_a, bonus_quadorder_f = bonus_quadorder_f, use_iterative_solver = use_iterative_solver)
+        time_solve = @elapsed bdofs = solve!(problem, sol, f!, C; bonus_quadorder_a = bonus_quadorder_a, bonus_quadorder_f = bonus_quadorder_f, use_iterative_solver = use_iterative_solver)
         df[lvl, :time_solve] = time_solve
 
         if isnothing(Plotter) && plot_solution
@@ -275,7 +273,7 @@ function _main(
         end
 
         weightederrorH1, weightederrorL2u, weightederrorL2p, uniformerrorH1, uniformerrorL2u, uniformerrorL2p = calculate_sampling_error_2(
-            sol, C; problem, metrics_configurations = stokes_metrics_configuration, (rhs!) = (f!), order = order + 1, nsamples, debug
+            sol, f!, C; problem, metrics_configuration = stokes_metrics_configuration, order = order + 1, nsamples
         )
 
         tail_extension = data["tail_extension"]
