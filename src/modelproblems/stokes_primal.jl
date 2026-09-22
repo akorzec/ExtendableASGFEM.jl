@@ -89,8 +89,7 @@ function solve!(
         assemble!(
             Am,
             BilinearOperator(
-                get_am_x(m, C), [grad(1)], [grad(1)];
-                bonus_quadorder = bonus_quadorder_a, #factor=2/sqrt(2)
+                get_am_x(m, C), [grad(1)], [grad(1)]; bonus_quadorder = bonus_quadorder_a,
             )
         )
         push!(A, Am)

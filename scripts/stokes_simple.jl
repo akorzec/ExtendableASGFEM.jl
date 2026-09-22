@@ -13,8 +13,8 @@ using Symbolics
 ## Structs for the description of numerical examples
 struct DomainConfiguration
     type::String
-    shift::Vector{Float64}
-    scale::Vector{Float64}
+    shift::Union{Vector{Float64}, Nothing}
+    scale::Union{Vector{Float64}, Nothing}
 end
 
 struct StochasticConfiguration{T1 <: OrthogonalPolynomialType, T2 <: AbstractStochasticCoefficient}
@@ -22,13 +22,15 @@ struct StochasticConfiguration{T1 <: OrthogonalPolynomialType, T2 <: AbstractSto
     SCType::Type{T2}
 end
 
-struct RunConfiguration{TOBType <: OrthogonalPolynomialType, TSCType <: AbstractStochasticCoefficient}
+struct RunConfiguration{
+        TOBType <: OrthogonalPolynomialType, TSCType <: AbstractStochasticCoefficient, Tkwargs,
+    }
     generate_data::Function
     domain_configuration::Union{DomainConfiguration, Nothing}
     stochastic_configuration::Union{StochasticConfiguration{TOBType, TSCType}, Nothing}
     initial_modes::Vector{Vector{Int}}
-    plot_path::Union{String, Nothing}
     runner::Function
+    kwargs_list::Vector{Tkwargs}
 end
 
 ## Helper methods for creating functions from symbolic expressions
@@ -62,7 +64,7 @@ end
 
 ## Helper methods for the generation of the synthetic problem data and for the construction
 ## of data structures for the spatial and stochastic discretization
-function prepare_data(rc::RunConfiguration; kwargs...)
+function prepare_data_for_example_with_analytical_solution(rc::RunConfiguration; kwargs...)
     exact_f!, exact_u!, exact_∇u!, exact_p! = rc.generate_data(; kwargs...)
 
     function error_configuration_closure(exact_func!::Function, oa_args, ids)
@@ -127,8 +129,8 @@ end
 
 function create_plot(
         xdata, ydata; xscale = identity, yscale = identity, xlabel::LaTeXStrings.LaTeXString,
-        ylabel::LaTeXStrings.LaTeXString, title::LaTeXStrings.LaTeXString,
-        labels::Vector{LaTeXStrings.LaTeXString}, position = :rt, plot_path::String,
+        ylabel::LaTeXStrings.LaTeXString, title::LaTeXStrings.LaTeXString, position = :rt,
+        plot_path::String, labels::Vector{LaTeXStrings.LaTeXString}, show_optimal_rate = false,
     )
     colors = Makie.wong_colors()
     p = Makie.Figure(fontsize = 18, size = (900, 600))
@@ -144,9 +146,19 @@ function create_plot(
             markersize = 10, linewidth = 2, linestyle = :solid
         )
     end
+    if show_optimal_rate
+        linestyles = [:dot, :dashdot, :dashdotdot]
+        for i in 1:3
+            scatterlines!(
+                xdata, xdata .^ (-i), label = L"\mathcal{O}(h^{%$(-i)})", color = :gray,
+                markersize = 0, linewidth = 2, linestyle = linestyles[i],
+            )
+        end
+    end
     axislegend(
         ax, merge = true, labelsize = 16, orientation = :horizontal, position = position
     )
+
     CairoMakie.save(plot_path, p)
 
     return nothing
@@ -157,7 +169,7 @@ function generate_data_for_simple_example(; kwargs...)
     ν = get(kwargs, :ν, [1.0, 0.2])
 
     @variables x1, x2, y1
-    # ToDo: deterministic boundary data?
+
     u = [0, (1 / 2) * (1 - x1^2)]
     ∇u = Symbolics.jacobian(u, [x1, x2])
     ∇u_reshaped = [∇u[1, 1], ∇u[1, 2], ∇u[2, 1], ∇u[2, 2]]
@@ -180,8 +192,7 @@ function generate_data_for_simple_example_with_modified_rhs(; kwargs...)
 
     _, exact_u!, exact_∇u!, _ = generate_data_for_simple_example(; kwargs...)
     f = [x1, x2]
-    # Subtract double integral of g(x, y) = 1/3 on [-1, 1] x [-1, 1] for compatibility condition
-    # -> ToDo: Calculate by numerical integration
+    # D = [-1, 1] × [-1, 1] and ∫_D p = 4/3 => subtract 1/3
     p = - ν[1] * x2 - ν[2] * x2 * y1 + 0.5 * (x1^2 + x2^2) - 1 / 3
 
     exact_f! = map_expression_to_deterministic_kernel(f, [x1, x2])
@@ -190,49 +201,54 @@ function generate_data_for_simple_example_with_modified_rhs(; kwargs...)
     return exact_f!, exact_u!, exact_∇u!, exact_p!
 end
 
-function generate_data_for_complex_example()
-    @variables x1, x2, y1
+function generate_data_for_complex_example(; kwargs...)
+    ν = get(kwargs, :ν, [1.0, 0.2])
 
-    u = [sin(pi * x1) * cos(pi * x2) * (1 + sin(y1)), -cos(pi * x1) * sin(pi * x2) * (1 + sin(y1))]
-    ∇u = Symbolics.jacobian(u, [x1, x2])
-    ∇u_reshaped = [∇u[1, 1], ∇u[1, 2], ∇u[2, 1], ∇u[2, 2]]
+    @variables x1, x2
+
+    ψ = x1^2 * (x1 - 1)^2 * x2^2 * (x2 - 1)^2
+    ∇ψ = Symbolics.gradient(ψ, [x1, x2])
+    curl_ψ = [-∇ψ[2], ∇ψ[1]]
+    ∇u = Symbolics.jacobian(curl_ψ, [x1, x2])
     Δu = [
         Symbolics.derivative(∇u[1, 1], x1) + Symbolics.derivative(∇u[1, 2], x2),
         Symbolics.derivative(∇u[2, 1], x1) + Symbolics.derivative(∇u[2, 2], x2),
     ]
-    p = sin(pi * x1) * cos(pi * x2) * (1 + sin(y1))
+    p = x1^3
     ∇p = Symbolics.gradient(p, [x1, x2])
-
-    ν = 1 + cos(y1)
-    f = 0 * [x1, x2]
+    f = - ν[1] * Δu + ∇p
+    boundary_data = 0 * [x1, x2]
 
     return map_expression_to_deterministic_kernel(f, [x1, x2]),
-        map(
-            map_expression_to_stochastic_kernel,
-            (u, ∇u_reshaped, p),
-            (
-                [y1, x1, x2], [y1, x1, x2], [y1, x1, x2], [y1, x1, x2],
-            ),
-            (y -> [y[1]], y -> [y[1]], y -> [y[1]])
-        )...
-
+        map_expression_to_stochastic_kernel(boundary_data, [x1, x2])
 end
 
 ## Code containing the actual numerical examples
-function runner_plot_modes_for_solution(rc::RunConfiguration)
-    C = rc.stochastic_configuration.SCType()
-    exact_f!, exact_u! = prepare_data(rc)
-    nrefs = 5
+function runner_plot_modes_for_solution(rc::RunConfiguration; kwargs...)
+    α = get(kwargs, :α, 1)
+    ν = α * get(kwargs, :ν, [1.0, 0.2])
+    reconstruct = get(kwargs, :reconstruct, false)
+    FETypes = get(kwargs, :FETypes, (H1P2{2, 2}, H1P1{1}))
+    nrefs = get(kwargs, :nrefs, 5)
+
+    SCType = rc.stochastic_configuration.SCType
+    C = SCType(ν)
+
+    exact_f!, exact_boundary! = rc.generate_data(; ν = ν)
+
     xgrid, _ = prepare_domain(rc, nrefs)
     multi_indices, TensorBasis = prepare_stochastic_data_structures(rc)
 
-    FETypes, unames = (H1P2{2, 2}, H1P1{1}), ["u", "p"]
+    unames = ["u", "p"]
     FES = [FESpace{FETypes[1]}(xgrid), FESpace{FETypes[2]}(xgrid)]
 
     SolutionSGFEM = SGFEVector(FES, TensorBasis; active_modes = 1:length(multi_indices), unames)
     solve!(
-        StokesProblemPrimal, SolutionSGFEM, exact_f!, C; (exact_boundary!) = (exact_u!([0, 0])),
-        bonus_quadorder_f = 2, use_iterative_solver = true, reconstruct = false,
+        # Stochastic boundary data are not supported by the codebase. Thus, exact_u! is required to be
+        # deterministic for this function to work. If exact_u! is a deterministic function, then the
+        # boundary data can be obtained by evaluating exact_u! at any point in the stochastic domain.
+        StokesProblemPrimal, SolutionSGFEM, exact_f!, C; (exact_boundary!) = (exact_boundary!([0, 0])),
+        bonus_quadorder_f = 10, use_iterative_solver = true, reconstruct = reconstruct,
     )
 
     display(plot_modes(SolutionSGFEM; Plotter = PythonPlot, ncols = 4, normalizePattern = ["p"]))
@@ -240,8 +256,9 @@ function runner_plot_modes_for_solution(rc::RunConfiguration)
     return SolutionSGFEM
 end
 
-function runner_error_for_taylor_hood_element(rc::RunConfiguration)
-    exact_f!, exact_u!, error_u_closure, error_∇u_closure, error_p_closure = prepare_data(rc)
+function runner_error_for_taylor_hood_element(rc::RunConfiguration; kwargs...)
+    exact_f!, exact_u!, error_u_closure, error_∇u_closure, error_p_closure =
+        prepare_data_for_example_with_analytical_solution(rc)
     C = rc.stochastic_configuration.SCType()
     multi_indices, TensorBasis = prepare_stochastic_data_structures(rc)
     M::Int = maxlength_multiindices(TensorBasis)
@@ -258,6 +275,7 @@ function runner_error_for_taylor_hood_element(rc::RunConfiguration)
     metrics = setup_metrics(StokesProblemPrimal, metrics_configuration)
 
     FETypes, unames = (H1P2{2, 2}, H1P1{1}), ["u", "p"]
+
     SolutionSGFEM = nothing
     ndofs, error = Vector{Float64}(undef, 0), Vector{Vector{Float64}}(undef, 0)
     for nrefs in 1:5
@@ -266,10 +284,12 @@ function runner_error_for_taylor_hood_element(rc::RunConfiguration)
 
         SolutionSGFEM = SGFEVector(FES, TensorBasis; active_modes = 1:length(multi_indices), unames)
         solve!(
-            StokesProblemPrimal, SolutionSGFEM, exact_f!, C;
-            (exact_boundary!) = (exact_u!([0, 0])), bonus_quadorder_f = 2,
-            use_iterative_solver = true, reconstruct = false,
-        ) # ToDo: What if exact_boundary! is actually stochastic?
+            # Stochastic boundary data are not supported by the codebase. Thus, exact_u! is required to be
+            # deterministic for this function to work. If exact_u! is a deterministic function, then the
+            # boundary data can be obtained by evaluating exact_u! at any point in the stochastic domain.
+            StokesProblemPrimal, SolutionSGFEM, exact_f!, C; (exact_boundary!) = (exact_u!([0, 0])),
+            bonus_quadorder_f = 2, use_iterative_solver = true, reconstruct = false,
+        )
 
         u_error, ∇u_error, p_error = apply_error_integrators_from_metrics!(
             SolutionSGFEM, nothing, metrics, Samples, weights, M, Msamples; dimensionwise_error = false
@@ -278,43 +298,50 @@ function runner_error_for_taylor_hood_element(rc::RunConfiguration)
         push!(error, [u_error[end]; ∇u_error[end]; p_error[end]])
     end
 
-    create_plot(
-        ndofs, error; xscale = log10, yscale = log10,
-        xlabel = L"\text{number of degrees of freedom}", ylabel = L"error measured in $L^2$-norm",
-        title = L"""Error for $-\nabla\cdot(\nu\nabla\mathbf{u}) + \nabla p = \mathbf{0}$
-        with Taylor-Hood pair $\mathcal{P}_2/\mathcal{P}_1$""",
-        labels = [L"\|u - u_h\|_{L^2}", L"\|∇(u - u_h)\|_{L^2}", L"\|p - p_h\|_{L^2}"],
-        plot_path = rc.plot_path, position = :lt,
-    )
+    if haskey(kwargs, :plot_path)
+        create_plot(
+            ndofs, error; xscale = log10, yscale = log10,
+            xlabel = L"\text{number of degrees of freedom}", ylabel = L"error measured in $L^2$-norm",
+            title = L"""Error for $-\nabla\cdot(\nu\nabla\mathbf{u}) + \nabla p = \mathbf{0}$
+            with Taylor-Hood pair $\mathcal{P}_2/\mathcal{P}_1$""",
+            labels = [L"\|u - u_h\|_{L^2}", L"\|∇(u - u_h)\|_{L^2}", L"\|p - p_h\|_{L^2}"],
+            plot_path = kwargs[:plot_path], position = :lt,
+        )
+    end
 
     return SolutionSGFEM
 end
 
-function runner_non_pressure_robustness_error(rc::RunConfiguration)
-    nrefs = 4
+function runner_non_pressure_robustness_error(rc::RunConfiguration; kwargs...)
+    nrefs = get(kwargs, :nrefs, 4)
+    reconstruct = get(kwargs, :reconstruct, false)
+
     xgrid, _ = prepare_domain(rc, nrefs)
     SCType = rc.stochastic_configuration.SCType
     multi_indices, TensorBasis = prepare_stochastic_data_structures(rc)
     ν = [1.0, 0.2]
 
-    FETypes, unames = (H1P2{2, 2}, H1P1{1}), ["u", "p"]
+    FETypes, unames = (H1BR{2}, L2P0{1}), ["u", "p"]
     FES = [FESpace{FETypes[1]}(xgrid), FESpace{FETypes[2]}(xgrid)]
 
     SolutionSGFEM, metrics = nothing, nothing
-    nsamples = 100
     exponent_range, error = 1:-1:-9, Vector{Vector{Float64}}(undef, 0)
     for i in exponent_range
         α = 10.0^i
         C = SCType(α * ν)
-        exact_f!, exact_u!, error_u_closure, error_∇u_closure, error_p_closure = prepare_data(rc; ν = α * ν)
+        exact_f!, exact_u!, error_u_closure, error_∇u_closure, error_p_closure =
+            prepare_data_for_example_with_analytical_solution(rc; ν = α * ν)
 
         SolutionSGFEM = SGFEVector(FES, TensorBasis; active_modes = 1:length(multi_indices), unames)
         solve!(
+            # Stochastic boundary data are not supported by the codebase. Thus, exact_u! is required to be
+            # deterministic for this function to work. If exact_u! is a deterministic function, then the
+            # boundary data can be obtained by evaluating exact_u! at any point in the stochastic domain.
             StokesProblemPrimal, SolutionSGFEM, exact_f!, C; (exact_boundary!) = (exact_u!([0, 0])),
-            bonus_quadorder_f = 2, use_iterative_solver = true, reconstruct = false,
-        ) # ToDo: What if exact_boundary! is actually stochastic?
+            bonus_quadorder_f = 2, use_iterative_solver = true, reconstruct = reconstruct,
+        )
 
-        Msamples = maxm(C)
+        nsamples, Msamples = 100, maxm(C)
         Samples, weights = sample_distribution(
             TensorBasis, nsamples; M = Msamples, Mweights = Msamples
         )
@@ -332,20 +359,74 @@ function runner_non_pressure_robustness_error(rc::RunConfiguration)
         push!(error, [u_error[end]; ∇u_error[end]; p_error[end]])
     end
 
-    create_plot(
-        10.0 .^ (exponent_range), error; xscale = log10, yscale = log10,
-        xlabel = L"\alpha", ylabel = L"error measured in $L^2$-norm",
-        title = L"""Error for $-\nabla\cdot((\alpha \cdot \nu)\nabla\mathbf{u}) + \nabla p = \mathbf{x}$,
-        with Taylor-Hood pair $\mathcal{P}_2/\mathcal{P}_1$""",
-        labels = [L"\|u - u_h\|_{L^2}", L"\|∇(u - u_h)\|_{L^2}", L"\|p - p_h\|_{L^2}"],
-        plot_path = rc.plot_path,
-    )
+    if haskey(kwargs, :plot_path)
+        create_plot(
+            10.0 .^ (exponent_range), error; xscale = log10, yscale = log10, xlabel = L"\alpha",
+            ylabel = L"error measured in $L^2$-norm", plot_path = kwargs[:plot_path],
+            title = L"""Error for $-\nabla\cdot((\alpha \cdot \nu)\nabla\mathbf{u}) + \nabla p = \mathbf{x}$,
+            with Taylor-Hood pair $\mathcal{P}_2/\mathcal{P}_1$""",
+            labels = [L"\|u - u_h\|_{L^2}", L"\|∇(u - u_h)\|_{L^2}", L"\|p - p_h\|_{L^2}"],
+        )
+    end
+
+    return SolutionSGFEM
+end
+
+function runner_convergence_plot(rc::RunConfiguration; kwargs...)
+    α = get(kwargs, :α, 1)
+    ν = α * get(kwargs, :ν, [1.0, 0.2])
+    reconstruct = get(kwargs, :reconstruct, false)
+    FETypes = get(kwargs, :FETypes, (H1P2{2, 2}, H1P1{1}))
+    nrefs_max = get(kwargs, :nrefs_max, 4)
+
+    SCType = rc.stochastic_configuration.SCType
+    C = SCType(ν)
+    multi_indices, TensorBasis = prepare_stochastic_data_structures(rc)
+
+    exact_f!, exact_boundary! = rc.generate_data(; ν = ν)
+
+    unames = ["u", "p"]
+
+    SolutionSGFEM = nothing
+    ndofs, error = Vector{Float64}(undef, 0), Vector{Vector{Float64}}(undef, 0)
+    for nrefs in 1:nrefs_max
+        xgrid, _ = prepare_domain(rc, nrefs)
+        FES = [FESpace{FETypes[1]}(xgrid), FESpace{FETypes[2]}(xgrid)]
+
+        SolutionSGFEM = SGFEVector(FES, TensorBasis; active_modes = 1:length(multi_indices), unames)
+        solve!(
+            # Stochastic boundary data are not supported by the codebase. Thus, exact_u! is required to be
+            # deterministic for this function to work. If exact_u! is a deterministic function, then the
+            # boundary data can be obtained by evaluating exact_u! at any point in the stochastic domain.
+            StokesProblemPrimal, SolutionSGFEM, exact_f!, C; (exact_boundary!) = (exact_boundary!([0, 0])),
+            bonus_quadorder_f = 10, use_iterative_solver = true, reconstruct = reconstruct,
+        )
+
+        l2stress_error, l2u_error, l2p_error = calculate_sampling_error_2(
+            SolutionSGFEM, exact_f!, C; problem = StokesProblemPrimal, nsamples = 100, order = 2,
+            metrics_configuration = stokes_metrics_configuration, dimensionwise_error = true,
+        )
+
+        push!(ndofs, (FES[1].ndofs + FES[2].ndofs) * length(multi_indices))
+        push!(error, [l2stress_error[end]; l2u_error[end]; l2p_error[end]])
+    end
+
+    if haskey(kwargs, :plot_path)
+        create_plot(
+            ndofs, error; xscale = log10, yscale = log10, xlabel = L"\text{number of degrees of freedom}",
+            ylabel = L"error measured in $L^2$-norm", plot_path = kwargs[:plot_path], position = :rt,
+            title = reconstruct ? L"\text{Convergence plot for the complex example with reconstruction operator}"
+                : L"\text{Convergence plot for the complex example without reconstruction operator}",
+            labels = [L"\|u - u_h\|_{L^2}", L"\|∇(u - u_h)\|_{L^2}", L"\|p - p_h\|_{L^2}"], show_optimal_rate = true,
+        )
+    end
 
     return SolutionSGFEM
 end
 
 ## Declarative definition of numerical examples
-domain_configuration_square = DomainConfiguration("square", [-0.5, -0.5], [2, 2])
+domain_configuration_standard_square = DomainConfiguration("square", nothing, nothing)
+domain_configuration_large_square = DomainConfiguration("square", [-0.5, -0.5], [2, 2])
 
 stochastic_configuration_constant_coefficients = StochasticConfiguration(
     LegendrePolynomials, StochasticCoefficientConstants,
@@ -353,57 +434,78 @@ stochastic_configuration_constant_coefficients = StochasticConfiguration(
 
 run_configuration_show_modes = RunConfiguration(
     generate_data_for_simple_example,
-    domain_configuration_square,
+    domain_configuration_large_square,
     stochastic_configuration_constant_coefficients,
     [[0], [1]],
-    nothing,
     runner_plot_modes_for_solution,
-)
-
-run_configuration_show_modes_2 = RunConfiguration(
-    generate_data_for_complex_example,
-    domain_configuration_square,
-    stochastic_configuration_constant_coefficients,
-    [[0], [1]],
-    nothing,
-    runner_plot_modes_for_solution,
+    [],
 )
 
 run_configuration_error_for_taylor_hood_element = RunConfiguration(
     generate_data_for_simple_example,
-    domain_configuration_square,
+    domain_configuration_large_square,
     stochastic_configuration_constant_coefficients,
     [[0], [1]],
-    "data/taylor_hood_error_for_simple_example.svg",
     runner_error_for_taylor_hood_element,
+    [Dict(:plot_path => "plots/taylor_hood_error_for_simple_example.svg")],
 )
 
 run_configuration_non_pressure_robust_example = RunConfiguration(
     generate_data_for_simple_example_with_modified_rhs,
-    domain_configuration_square,
+    domain_configuration_large_square,
     stochastic_configuration_constant_coefficients,
     [[0], [1]],
-    "data/non_pressure_robust_error_for_simple_example.svg",
     runner_non_pressure_robustness_error,
+    [Dict(:plot_path => "plots/non_pressure_robust_error_for_simple_example.svg")],
 )
 
-run_configurations_for_simple_example = [
+run_configuration_show_modes_complex_example = RunConfiguration(
+    generate_data_for_complex_example,
+    domain_configuration_standard_square,
+    stochastic_configuration_constant_coefficients,
+    [[0], [1], [2], [3]],
+    runner_plot_modes_for_solution,
+    [
+        Dict(:α => 10.0^(-6), :FETypes => (H1BR{2}, L2P0{1}), :nrefs => 4, :reconstruct => false),
+        Dict(:α => 10.0^(-6), :FETypes => (H1BR{2}, L2P0{1}), :nrefs => 4, :reconstruct => true),
+    ]
+)
+
+run_configuration_convergence_plot_complex_example = RunConfiguration(
+    generate_data_for_complex_example,
+    domain_configuration_standard_square,
+    stochastic_configuration_constant_coefficients,
+    [[0], [1], [2], [3]],
+    runner_convergence_plot,
+    [
+        Dict(
+            :α => 10.0^(-4), :FETypes => (H1BR{2}, L2P0{1}), :reconstruct => false,
+            :plot_path => "plots/convergence_plot_for_complex_example_non_pressure_robust.svg"
+        ),
+        Dict(
+            :α => 10.0^(-4), :FETypes => (H1BR{2}, L2P0{1}), :reconstruct => true,
+            :plot_path => "plots/convergence_plot_for_complex_example_pressure_robust.svg"
+        ),
+    ]
+)
+
+run_configurations = [
     run_configuration_show_modes,
     run_configuration_error_for_taylor_hood_element,
     run_configuration_non_pressure_robust_example,
-]
-
-run_configurations = [
-    run_configurations_for_simple_example...,
+    run_configuration_show_modes_complex_example,
+    run_configuration_convergence_plot_complex_example,
 ]
 
 ## Helper methods for executing numerical examples, which are represented as RunConfiguration structs
 function execute_runner(rc::RunConfiguration)
-    return rc.runner(rc)
+    return isempty(rc.kwargs_list) ?
+        rc.runner(rc) :
+        map(kwargs -> rc.runner(rc; kwargs...), rc.kwargs_list)
 end
 
 function execute_all()
-    return foreach(execute_runner, run_configurations)
+    return map(execute_runner, run_configurations)
 end
 
 end
