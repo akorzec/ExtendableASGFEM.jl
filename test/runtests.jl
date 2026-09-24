@@ -3,6 +3,8 @@ using LinearAlgebra
 using DoubleFloats
 using ExplicitImports
 using Aqua
+using LinearSolve: LinearProblem, KrylovJL_GMRES, solve
+using SciMLOperators: FunctionOperator
 using Test
 
 include("../scripts/poisson_simple.jl")
@@ -155,18 +157,54 @@ function main()
         end
     end
 
-    @testset "poisson_simple integration" begin
-        sol = PoissonSimple.main(
-            nrefs = 1,
-            order = 1,
-            decay = 2.0,
-            mean = 1.0,
-            domain = "square",
-            initial_modes = [[0], [1, 0], [0, 1]],
-            use_iterative_solver = false,
-            Plotter = nothing,
+    # Smoke test for the third-party API chain used by the solve_*! drivers:
+    # FunctionOperator -> LinearProblem -> solve(alg = KrylovJL_GMRES()).
+    # The calling conventions across LinearSolve/SciMLOperators/Krylov have broken
+    # in past releases; this pins them down independently of the FEM machinery.
+    # The project's own operators are covered by "iterative vs. full solver consistency".
+    @testset "LinearSolve matrix-free operator contract" begin
+        A = [2.0 0.0; 0.0 3.0]
+        b = [1.0, 2.0]
+        op = FunctionOperator(
+            (y, x, u, p, t) -> y .= A * x,
+            zeros(2),
+            zeros(2);
+            T = Float64,
+            islinear = true,
+            isconstant = true,
+            ifcache = false,
         )
-        @test !isnothing(sol)
+        prob = LinearProblem(op, b)
+        sol = solve(prob; alg = KrylovJL_GMRES(), verbose = false)
+        @test norm(sol.u - (A \ b)) < 1e-10
+    end
+
+    @testset "iterative vs. full solver consistency" begin
+        # both solvers discretise the same SG problem, so their solutions must agree
+        # up to GMRES tolerance and the boundary stiffening of the direct solve
+        for problem in [PoissonProblemPrimal, LogTransformedPoissonProblemPrimal, LogTransformedPoissonProblemDual]
+            sol_full = PoissonSimple.main(
+                problem = problem,
+                nrefs = 1,
+                order = 1,
+                domain = "square",
+                initial_modes = [[0], [1, 0], [0, 1]],
+                use_iterative_solver = false,
+                calculate_error = false,
+                Plotter = nothing,
+            )
+            sol_iter = PoissonSimple.main(
+                problem = problem,
+                nrefs = 1,
+                order = 1,
+                domain = "square",
+                initial_modes = [[0], [1, 0], [0, 1]],
+                use_iterative_solver = true,
+                calculate_error = false,
+                Plotter = nothing,
+            )
+            @test norm(sol_iter.entries - sol_full.entries) < 1.0e-8 * norm(sol_full.entries)
+        end
     end
 
     return

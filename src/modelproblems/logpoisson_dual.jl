@@ -103,7 +103,7 @@ function solve!(
     if use_iterative_solver
         @time bdofs = solve_logpoisson_dual!(sol, A, B, N0, N, b0, G, nmodes, 1)
     else
-        @time bdofs = solve_logpoisson_dual_full!(sol, A, B, N0, N, b0, G, nmodes, 1)
+        @time bdofs = solve_logpoisson_dual_full!(sol, A, B, N0, N, b0, G, nmodes)
     end
 
     return bdofs

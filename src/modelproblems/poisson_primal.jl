@@ -72,9 +72,9 @@ function solve!(
 
     ## solve
     if use_iterative_solver
-        @time bdofs = solve_primal!(sol, A0, A, b, TB.G, TB.nmodes, 1)
+        @time bdofs = solve_primal!(sol, A0, A, b, TB.G, TB.nmodes)
     else
-        @time bdofs = solve_full_primal!(sol, A0, A, b, TB.G, TB.nmodes, 1)
+        @time bdofs = solve_full_primal!(sol, A0, A, b, TB.G, TB.nmodes)
     end
 
     return bdofs

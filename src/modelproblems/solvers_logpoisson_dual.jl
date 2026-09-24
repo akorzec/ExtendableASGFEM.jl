@@ -19,8 +19,27 @@ struct MySystemLogDual{Tv, MT, VT, GT}
     G::GT
     nmodes::Int
     vsize::Array{Int, 1}
+    couplings::Vector{Tuple{Int, Int, Int, Tv}}
 end
 Base.size(S::MySystemLogDual) = S.nmodes .* (size(S.A.entries) .+ size(S.B.entries)[2])
+
+"""
+    MySystemLogDual(A, B, N0, Nm, G, nmodes, vsize)
+
+Convenience constructor that precomputes the nonzero coupling list `(mu, nu, e, g)` from `G`.
+"""
+function MySystemLogDual(A, B, N0, Nm, G, nmodes, vsize)
+    Tv = eltype(G)
+    M = length(Nm)
+    couplings = Tuple{Int, Int, Int, Tv}[]
+    for mu in 1:nmodes, nu in 1:nmodes, e in 1:M
+        g = G[(e - 1) * nmodes + mu, nu]
+        if g != 0
+            push!(couplings, (mu, nu, e, g))
+        end
+    end
+    return MySystemLogDual{Tv, typeof(A), typeof(couplings), typeof(G)}(A, B, N0, Nm, G, nmodes, vsize, couplings)
+end
 
 struct MyPreconditionerLogDual{Tv, FAC}
     LUS::FAC
@@ -99,19 +118,17 @@ end
 
 function LinearAlgebra.mul!(Ax::Vector{Tv}, S::MySystemLogDual{Tv, MT, VT, GT}, x) where {Tv, MT, VT, GT}
     fill!(Ax, 0)
-    g::Tv = 0
+    A::MT = S.A
+    N0::MT = S.N0
+    B::MT = S.B
+    Nm::Vector{MT} = S.Nm
     vsize::Array{Int, 1} = S.vsize
     nmodes::Int = S.nmodes
-    G::GT = S.G
-    Nm::Vector{MT} = S.Nm
-    M::Int = length(Nm) # size(G,1) / nmodes
+    couplings = S.couplings
     a::Int = 0
     b::Int = 0
     a2::Int = 0
     b2::Int = 0
-    A::MT = S.A
-    N0::MT = S.N0
-    B::MT = S.B
     for mu in 1:nmodes
         # deterministic part
         a = (mu - 1) * vsize[1] + 1
@@ -128,23 +145,20 @@ function LinearAlgebra.mul!(Ax::Vector{Tv}, S::MySystemLogDual{Tv, MT, VT, GT}, 
         a = nmodes * vsize[1] + (mu - 1) * vsize[2] + 1
         b = nmodes * vsize[1] + mu * vsize[2]
         addblock_matmul!(view(Ax, a:b), B[1, 1], view(x, a2:b2); transposed = true)
+    end
 
-        # stochastic part
+    # stochastic part
+    for (mu, nu, e, g) in couplings
         a = (mu - 1) * vsize[1] + 1
         b = mu * vsize[1]
-        for nu in 1:nmodes, e in 1:M
-            g = G[(e - 1) * nmodes + mu, nu]
-            if g != 0
-                a2 = nmodes * vsize[1] + (nu - 1) * vsize[2] + 1
-                b2 = nmodes * vsize[1] + nu * vsize[2]
-                addblock_matmul!(view(Ax, a:b), Nm[e][1, 1], view(x, a2:b2); factor = g)
-            end
-        end
+        a2 = nmodes * vsize[1] + (nu - 1) * vsize[2] + 1
+        b2 = nmodes * vsize[1] + nu * vsize[2]
+        addblock_matmul!(view(Ax, a:b), Nm[e][1, 1], view(x, a2:b2); factor = g)
     end
-    return
+    return Ax
 end
 
-Base.eltype(S::MySystemLogDual) = typeof(S).parameters[1]
+Base.eltype(::MySystemLogDual{Tv}) where {Tv} = Tv
 Base.size(S::MySystemLogDual, d::Int) = S.nmodes * (S.vsize[1] + S.vsize[2])
 
 function solve_logpoisson_dual!(SolutionSGFEM::SGFEVector, A, B, N0, Nm, b0, G, nmodes, bfac; atol = 1.0e-14, rtol = 1.0e-14)
@@ -152,7 +166,7 @@ function solve_logpoisson_dual!(SolutionSGFEM::SGFEVector, A, B, N0, Nm, b0, G, 
     ## create fullmatrix-free matrix evaluator
     @info "Solving StochasticFEM iteratively and matrix-free (ndofs = $(length(SolutionSGFEM.entries)))..."
     vsize = [SolutionSGFEM[1].FES.ndofs, SolutionSGFEM[nmodes + 1].FES.ndofs]
-    S = MySystemLogDual{eltype(G), typeof(A), typeof(b0), typeof(G)}(A, B, N0, Nm, G, nmodes, vsize)
+    S = MySystemLogDual(A, B, N0, Nm, G, nmodes, vsize)
     @info "...initializing Preconditioner"
     @time P = MyPreconditionerLogDual(A.entries, B.entries, nmodes, vsize)
 
@@ -161,11 +175,28 @@ function solve_logpoisson_dual!(SolutionSGFEM::SGFEVector, A, B, N0, Nm, b0, G, 
     fill!(b.entries, 0)
     addblock!(b[nmodes + 1], b0[1]; factor = bfac)
 
-    ## solve
-    @info "...starting right-preconditioned GMRES"
-    x, history = Krylov.gmres(S, b.entries, SolutionSGFEM.entries; ldiv = true, atol = atol, rtol = rtol, M = P)
-    SolutionSGFEM.entries .= x
-    @show history
+    ## solve via LinearSolve's higher-level API while keeping the matrix-free operator
+    @info "...starting right-preconditioned GMRES via LinearSolve"
+    Aop = FunctionOperator(
+        (y, x, u, p, t) -> mul!(y, S, x),
+        zero(b.entries),
+        zero(b.entries);
+        T = eltype(b.entries),
+        islinear = true,
+        isconstant = true,
+        ifcache = false,
+    )
+    prob = LinearProblem(Aop, b.entries)
+    sol = solve(prob;
+        alg = KrylovJL_GMRES(),
+        abstol = atol,
+        reltol = rtol,
+        Pl = P,
+        Pr = P,
+        verbose = false,
+    )
+    SolutionSGFEM.entries .= sol.u
+    @show sol.stats
 
     ## check residual
     Ax = zero(SolutionSGFEM.entries)
@@ -174,7 +205,7 @@ function solve_logpoisson_dual!(SolutionSGFEM::SGFEVector, A, B, N0, Nm, b0, G, 
 end
 
 
-function solve_logpoisson_dual_full!(SolutionSGFEM::SGFEVector, A, B, N0, N, b0, G, nmodes, rhsfac)
+function solve_logpoisson_dual_full!(SolutionSGFEM::SGFEVector, A, B, N0, N, b0, G, nmodes)
 
     M::Int = length(N) # size(G,1) / nmodes
     FES = SolutionSGFEM.FES_space

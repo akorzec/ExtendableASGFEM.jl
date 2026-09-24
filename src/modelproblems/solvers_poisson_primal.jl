@@ -27,6 +27,8 @@ products without assembling the full block matrix.
 - `G::GT`: Coupling tensor with entries `G[e, mu, nu]` mapping KL indices `e` to mode pairs.
 - `bdofs::Vector{Int}`: Boundary dofs for homogeneous Dirichlet conditions.
 - `nmodes::Int`: Number of stochastic modes.
+- `couplings::Vector{Tuple{Int, Int, Int, Tv}}`: Nonzero entries of `G` precomputed as
+  `(mu, nu, e, g)` tuples, so that `mul!` never iterates over vanishing couplings.
 """
 struct MySystemPrimal{Tv, MT, VT, GT}
     A0::MT
@@ -34,8 +36,27 @@ struct MySystemPrimal{Tv, MT, VT, GT}
     G::GT
     bdofs::Vector{Int}
     nmodes::Int
+    couplings::Vector{Tuple{Int, Int, Int, Tv}}
 end
 Base.size(S::MySystemPrimal) = S.nmodes .* size(S.A0.entries)
+
+"""
+    MySystemPrimal(A0, Am, G, bdofs, nmodes)
+
+Convenience constructor that precomputes the nonzero coupling list `(mu, nu, e, g)` from `G`.
+"""
+function MySystemPrimal(A0, Am, G, bdofs, nmodes)
+    Tv = eltype(G)
+    M = length(Am)
+    couplings = Tuple{Int, Int, Int, Tv}[]
+    for mu in 1:nmodes, nu in 1:nmodes, e in 1:M
+        g = G[(e - 1) * nmodes + mu, nu]
+        if g != 0
+            push!(couplings, (mu, nu, e, g))
+        end
+    end
+    return MySystemPrimal{Tv, typeof(A0), typeof(couplings), typeof(G)}(A0, Am, G, bdofs, nmodes, couplings)
+end
 
 """
     MyPreconditionerPrimal{Tv, FAC}
@@ -50,12 +71,14 @@ Dirichlet conditions.
 # Fields
 - `LUA::FAC`: LU factorisation of ``A_0`` with stiffened boundary dofs.
 - `DA::Vector{Tv}`: Diagonal of ``A_0`` (kept for compatibility, not used in current path).
+- `temp::Vector{Tv}`: Scratch vector reused by the in-place path of `ldiv!`.
 - `bdofs::Vector{Int}`: Boundary dofs.
 - `nmodes::Int`: Number of stochastic modes.
 """
 struct MyPreconditionerPrimal{Tv, FAC}
     LUA::FAC
     DA::Array{Tv, 1}
+    temp::Array{Tv, 1}
     bdofs::Vector{Int}
     nmodes::Int
 end
@@ -82,7 +105,10 @@ function MyPreconditionerPrimal(A::ExtendableSparseMatrix{Tv, Ti}, bdofs, nmodes
     flush!(A)
     LUA = lu(A.cscmatrix)
 
-    return MyPreconditionerPrimal{Tv, typeof(LUA)}(LUA, DA, bdofs, nmodes)
+    # temporary storage array for solver
+    temp = zeros(Tv, size(A, 1))
+
+    return MyPreconditionerPrimal{Tv, typeof(LUA)}(LUA, DA, temp, bdofs, nmodes)
 end
 
 @inline LinearAlgebra.ldiv!(C::MyPreconditionerPrimal, b) = ldiv!(b, C, b)
@@ -107,9 +133,8 @@ end
             if y !== b
                 ldiv!(view(y, a:c), C.LUA, view(b, a:c))  # y = A\b
             else
-                temp = zeros(Tv, vsize)
-                ldiv!(temp, C.LUA, view(b, a:c))
-                y[a:c] .= temp
+                ldiv!(C.temp, C.LUA, view(b, a:c))
+                y[a:c] .= C.temp
             end
         end
         #if dof in bdofs
@@ -133,19 +158,18 @@ Matrix-free matmul for the block-structured SG Poisson operator.
 Computes the product ``Ax`` in-place without assembling the full block matrix. For each
 stochastic mode ``\\mu``, the deterministic diffusion ``A_0`` is applied to mode ``\\mu``
 of ``x``, and every KL perturbation ``A_e`` is applied to mode ``\\nu`` of ``x`` weighted
-by the coupling coefficient ``G_{e,\\mu,\\nu}``. Boundary rows are zeroed out after
+by the coupling coefficient ``G_{e,\\mu,\\nu}``. Only the nonzero couplings, precomputed
+in `S.couplings` at construction time, are traversed. Boundary rows are zeroed out after
 accumulation.
 """
 function LinearAlgebra.mul!(Ax, S::MySystemPrimal{Tv, MT, VT, GT}, x) where {Tv, MT, VT, GT}
     fill!(Ax, 0)
-    g::Tv = 0
     A0::MT = S.A0
+    Am::Vector{MT} = S.Am
     vsize::Int = size(A0.entries, 1)
     nmodes::Int = S.nmodes
     bdofs::Vector{Int} = S.bdofs
-    G::GT = S.G
-    Am::Vector{MT} = S.Am
-    M::Int = length(Am) # size(G,1) / nmodes
+    couplings = S.couplings
     a::Int = 0
     b::Int = 0
     a2::Int = 0
@@ -155,33 +179,33 @@ function LinearAlgebra.mul!(Ax, S::MySystemPrimal{Tv, MT, VT, GT}, x) where {Tv,
         # deterministic part
         a = (mu - 1) * vsize + 1
         b = mu * vsize
-        a2 = a
-        b2 = b
-        addblock_matmul!(view(Ax, a:b), A0[1, 1], view(x, a2:b2))
+        addblock_matmul!(view(Ax, a:b), A0[1, 1], view(x, a:b))
+    end
 
-        # stochastic part
-        for nu::Int in 1:nmodes, e::Int in 1:M
-            g = G[(e - 1) * nmodes + mu, nu]
-            if g != 0
-                a2 = (nu - 1) * vsize + 1
-                b2 = nu * vsize
-                addblock_matmul!(view(Ax, a:b), Am[e][1, 1], view(x, a2:b2); factor = g)
-            end
-        end
+    # stochastic part
+    for (mu, nu, e, g) in couplings
+        a = (mu - 1) * vsize + 1
+        b = mu * vsize
+        a2 = (nu - 1) * vsize + 1
+        b2 = nu * vsize
+        addblock_matmul!(view(Ax, a:b), Am[e][1, 1], view(x, a2:b2); factor = g)
+    end
 
+    for mu::Int in 1:nmodes
+        a = (mu - 1) * vsize + 1
         for dof in bdofs
             Ax[a + dof - 1] = 0
         end
     end
-    return
+    return Ax
 end
 
-Base.eltype(S::MySystemPrimal) = typeof(S).parameters[1]
-Base.size(S::MySystemPrimal, d::Int) = S.nmodes * size(S.A.entries, 1)
+Base.eltype(::MySystemPrimal{Tv}) where {Tv} = Tv
+Base.size(S::MySystemPrimal, d::Int) = S.nmodes * size(S.A0.entries, 1)
 
 
 """
-    solve_primal!(SolutionSGFEM::SGFEVector, A0, Am, b0, G, nmodes, bfac; atol, rtol)
+    solve_primal!(SolutionSGFEM::SGFEVector, A0, Am, b0, G, nmodes; atol, rtol)
 
 Solve the primal SG Poisson system iteratively using matrix-free preconditioned GMRES.
 
@@ -200,13 +224,12 @@ Krylov.jl's ``Krylov.gmres`` is used as the solver. Default tolerances are 1e-14
 - `b0`: Deterministic right-hand side block (applied to mode 1 only).
 - `G`: Coupling tensor ``G[e, mu, nu]``.
 - `nmodes`: Number of stochastic modes.
-- `bfac`: Not used.
 
 # Keywords
 - `atol`: Absolute GMRES tolerance (default 1.0e-14).
 - `rtol`: Relative GMRES tolerance (default 1.0e-14).
 """
-function solve_primal!(SolutionSGFEM::SGFEVector, A0, Am, b0, G, nmodes, bfac; atol = 1.0e-14, rtol = 1.0e-14)
+function solve_primal!(SolutionSGFEM::SGFEVector, A0, Am, b0, G, nmodes; atol = 1.0e-14, rtol = 1.0e-14)
 
     ## create fullmatrix-free matrix evaluator
     @info "Solving StochasticFEM iteratively and matrix-free (ndofs = $(length(SolutionSGFEM)))..."
@@ -220,7 +243,7 @@ function solve_primal!(SolutionSGFEM::SGFEVector, A0, Am, b0, G, nmodes, bfac; a
     end
     bdofs = unique(bdofs)
 
-    S = MySystemPrimal{eltype(G), typeof(A0), typeof(b0), typeof(G)}(A0, Am, G, bdofs, nmodes)
+    S = MySystemPrimal(A0, Am, G, bdofs, nmodes)
     @info "...initializing Preconditioner"
     @time P = MyPreconditionerPrimal(A0.entries, bdofs, nmodes)
 
@@ -233,12 +256,28 @@ function solve_primal!(SolutionSGFEM::SGFEVector, A0, Am, b0, G, nmodes, bfac; a
         end
     end
 
-    ## solve
-    @info "...starting preconditioned GMRES"
-    #x, stats = IterativeSolvers.gmres!(SolutionSGFEM.entries, S, b.entries; log = true, Pr = P, Pl = P)
-    x, stats = Krylov.gmres(S, b.entries, SolutionSGFEM.entries; ldiv = true, atol = atol, rtol = rtol, M = P)
-    SolutionSGFEM.entries .= x
-    @show stats
+    ## solve via LinearSolve's higher-level API while keeping the matrix-free operator
+    @info "...starting preconditioned GMRES via LinearSolve"
+    Aop = FunctionOperator(
+        (y, x, u, p, t) -> mul!(y, S, x),
+        zero(b.entries),
+        zero(b.entries);
+        T = eltype(b.entries),
+        islinear = true,
+        isconstant = true,
+        ifcache = false,
+    )
+    prob = LinearProblem(Aop, b.entries)
+    sol = solve(prob;
+        alg = KrylovJL_GMRES(),
+        abstol = atol,
+        reltol = rtol,
+        Pl = P,
+        Pr = P,
+        verbose = false,
+    )
+    SolutionSGFEM.entries .= sol.u
+    @show sol.stats
 
     ## check residual
     Ax = zero(SolutionSGFEM.entries)
@@ -249,7 +288,7 @@ end
 
 
 """
-    solve_full_primal!(SolutionSGFEM::SGFEVector, A0, A, b, G, nmodes, rhsfac)
+    solve_full_primal!(SolutionSGFEM::SGFEVector, A0, A, b, G, nmodes)
 
 Build the full block SG Poisson matrix and solve it with a direct backslash.
 
@@ -269,9 +308,8 @@ This function is primarily useful for verification against the matrix-free solve
 - `b`: Right-hand side blocks.
 - `G`: Coupling tensor.
 - `nmodes`: Number of stochastic modes.
-- `rhsfac`: Not used.
 """
-function solve_full_primal!(SolutionSGFEM::SGFEVector, A0, A, b, G, nmodes, rhsfac)
+function solve_full_primal!(SolutionSGFEM::SGFEVector, A0, A, b, G, nmodes)
 
     M::Int = length(A) # size(G,1) / nmodes
 
@@ -296,7 +334,6 @@ function solve_full_primal!(SolutionSGFEM::SGFEVector, A0, A, b, G, nmodes, rhsf
         for e in 1:M
             g = G[(e - 1) * nmodes + j, k] # ⟨ ξ_m ψ_mi(j) ψ_mi(k) ⟩
             if abs(g) > 1.0e-14
-                @show g, [e, multi_indices[j], multi_indices[k]]
                 addblock!(bigS[j, k], A[e][1, 1]; factor = g)
             end
         end

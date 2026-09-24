@@ -18,12 +18,32 @@ struct MySystemLogPrimal{Tv, MT, VT, GT}
     G::GT
     bdofs::Vector{Int}
     nmodes::Int
+    couplings::Vector{Tuple{Int, Int, Int, Tv}}
 end
 Base.size(S::MySystemLogPrimal) = S.nmodes .* size(S.A.entries)
+
+"""
+    MySystemLogPrimal(A, N0, Nm, G, bdofs, nmodes)
+
+Convenience constructor that precomputes the nonzero coupling list `(mu, nu, e, g)` from `G`.
+"""
+function MySystemLogPrimal(A, N0, Nm, G, bdofs, nmodes)
+    Tv = eltype(G)
+    M = length(Nm)
+    couplings = Tuple{Int, Int, Int, Tv}[]
+    for mu in 1:nmodes, nu in 1:nmodes, e in 1:M
+        g = G[(e - 1) * nmodes + mu, nu]
+        if g != 0
+            push!(couplings, (mu, nu, e, g))
+        end
+    end
+    return MySystemLogPrimal{Tv, typeof(A), typeof(couplings), typeof(G)}(A, N0, Nm, G, bdofs, nmodes, couplings)
+end
 
 struct MyPreconditionerLogPrimal{Tv, FAC}
     LUA::FAC
     DA::Array{Tv, 1}
+    temp::Array{Tv, 1}
     bdofs::Vector{Int}
     nmodes::Int
 end
@@ -41,7 +61,10 @@ function MyPreconditionerLogPrimal(A::ExtendableSparseMatrix{Tv, Ti}, bdofs, nmo
     flush!(A)
     LUA = lu(A.cscmatrix)
 
-    return MyPreconditionerLogPrimal{Tv, typeof(LUA)}(LUA, DA, bdofs, nmodes)
+    # temporary storage array for solver
+    temp = zeros(Tv, size(A, 1))
+
+    return MyPreconditionerLogPrimal{Tv, typeof(LUA)}(LUA, DA, temp, bdofs, nmodes)
 end
 
 @inline LinearAlgebra.ldiv!(C::MyPreconditionerLogPrimal, b) = ldiv!(b, C, b)
@@ -66,9 +89,8 @@ end
             if y !== b
                 ldiv!(view(y, a:c), C.LUA, view(b, a:c))  # y = A\b
             else
-                temp = zeros(Tv, vsize)
-                ldiv!(temp, C.LUA, view(b, a:c))
-                y[a:c] .= temp
+                ldiv!(C.temp, C.LUA, view(b, a:c))
+                y[a:c] .= C.temp
             end
         end
         #if dof in bdofs
@@ -86,51 +108,49 @@ end
 
 function LinearAlgebra.mul!(Ax, S::MySystemLogPrimal{Tv, MT, VT, GT}, x) where {Tv, MT, VT, GT}
     fill!(Ax, 0)
-    g::Tv = 0
     A::MT = S.A
+    N0::MT = S.N0
+    Nm::Vector{MT} = S.Nm
     vsize::Int = size(A.entries, 1)
     nmodes::Int = S.nmodes
     bdofs::Vector{Int} = S.bdofs
-    G::GT = S.G
-    Nm::Vector{MT} = S.Nm
-    M::Int = length(Nm) # size(G,1) / nmodes
+    couplings = S.couplings
     a::Int = 0
     b::Int = 0
     a2::Int = 0
     b2::Int = 0
-    N0::MT = S.N0
 
     for mu::Int in 1:nmodes
         # deterministic part
         a = (mu - 1) * vsize + 1
         b = mu * vsize
-        a2 = a
-        b2 = b
-        addblock_matmul!(view(Ax, a:b), A[1, 1], view(x, a2:b2))
-        addblock_matmul!(view(Ax, a:b), N0[1, 1], view(x, a2:b2))
+        addblock_matmul!(view(Ax, a:b), A[1, 1], view(x, a:b))
+        addblock_matmul!(view(Ax, a:b), N0[1, 1], view(x, a:b))
+    end
 
-        # stochastic part
-        for nu::Int in 1:nmodes, e::Int in 1:M
-            g = G[(e - 1) * nmodes + mu, nu]
-            if g != 0
-                a2 = (nu - 1) * vsize + 1
-                b2 = nu * vsize
-                addblock_matmul!(view(Ax, a:b), Nm[e][1, 1], view(x, a2:b2); factor = g)
-            end
-        end
+    # stochastic part
+    for (mu, nu, e, g) in couplings
+        a = (mu - 1) * vsize + 1
+        b = mu * vsize
+        a2 = (nu - 1) * vsize + 1
+        b2 = nu * vsize
+        addblock_matmul!(view(Ax, a:b), Nm[e][1, 1], view(x, a2:b2); factor = g)
+    end
 
+    for mu::Int in 1:nmodes
+        a = (mu - 1) * vsize + 1
         for dof in bdofs
             Ax[a + dof - 1] = 0
         end
     end
-    return
+    return Ax
 end
 
-Base.eltype(S::MySystemLogPrimal) = typeof(S).parameters[1]
+Base.eltype(::MySystemLogPrimal{Tv}) where {Tv} = Tv
 Base.size(S::MySystemLogPrimal, d::Int) = S.nmodes * size(S.A.entries, 1)
 
 
-function solve_logpoisson_primal!(SolutionSGFEM::SGFEVector, A, N0, Nm, b0, G, nmodes, bfac; atol = 1.0e-14, rtol = 1.0e-14)
+function solve_logpoisson_primal!(SolutionSGFEM::SGFEVector, A, N0, Nm, b0, G, nmodes; atol = 1.0e-14, rtol = 1.0e-14)
 
     ## create fullmatrix-free matrix evaluator
     @info "Solving StochasticFEM iteratively and matrix-free (ndofs = $(length(SolutionSGFEM)))..."
@@ -144,7 +164,7 @@ function solve_logpoisson_primal!(SolutionSGFEM::SGFEVector, A, N0, Nm, b0, G, n
     end
     bdofs = unique(bdofs)
 
-    S = MySystemLogPrimal{eltype(G), typeof(A), typeof(b0), typeof(G)}(A, N0, Nm, G, bdofs, nmodes)
+    S = MySystemLogPrimal(A, N0, Nm, G, bdofs, nmodes)
     @info "...initializing Preconditioner"
     @time P = MyPreconditionerLogPrimal(A.entries, bdofs, nmodes)
 
@@ -157,12 +177,28 @@ function solve_logpoisson_primal!(SolutionSGFEM::SGFEVector, A, N0, Nm, b0, G, n
         end
     end
 
-    ## solve
-    @info "...starting preconditioned GMRES"
-    #x, stats = IterativeSolvers.gmres!(SolutionSGFEM.entries, S, b.entries; log = true, Pr = P, Pl = P)
-    x, stats = Krylov.gmres(S, b.entries, SolutionSGFEM.entries; ldiv = true, atol = atol, rtol = rtol, M = P)
-    SolutionSGFEM.entries .= x
-    @show stats
+    ## solve via LinearSolve's higher-level API while keeping the matrix-free operator
+    @info "...starting preconditioned GMRES via LinearSolve"
+    Aop = FunctionOperator(
+        (y, x, u, p, t) -> mul!(y, S, x),
+        zero(b.entries),
+        zero(b.entries);
+        T = eltype(b.entries),
+        islinear = true,
+        isconstant = true,
+        ifcache = false,
+    )
+    prob = LinearProblem(Aop, b.entries)
+    sol = solve(prob;
+        alg = KrylovJL_GMRES(),
+        abstol = atol,
+        reltol = rtol,
+        Pl = P,
+        Pr = P,
+        verbose = false,
+    )
+    SolutionSGFEM.entries .= sol.u
+    @show sol.stats
 
     ## check residual
     Ax = zero(SolutionSGFEM.entries)
@@ -172,7 +208,7 @@ function solve_logpoisson_primal!(SolutionSGFEM::SGFEVector, A, N0, Nm, b0, G, n
 end
 
 
-function solve_logpoisson_primal_full!(SolutionSGFEM::SGFEVector, A, N0, N, b, G, nmodes, rhsfac)
+function solve_logpoisson_primal_full!(SolutionSGFEM::SGFEVector, A, N0, N, b, G, nmodes)
 
     M::Int = length(N) # size(G,1) / nmodes
 

@@ -135,9 +135,9 @@ function solve!(
 
     ## solve
     if use_iterative_solver
-        @time bdofs = solve_logpoisson_primal!(sol, A, FEMatrix(FES), N, b, G, nmodes, 1)
+        @time bdofs = solve_logpoisson_primal!(sol, A, FEMatrix(FES), N, b, G, nmodes)
     else
-        @time bdofs = solve_logpoisson_primal_full!(sol, A, FEMatrix(FES), N, b, G, nmodes, 1)
+        @time bdofs = solve_logpoisson_primal_full!(sol, A, FEMatrix(FES), N, b, G, nmodes)
     end
 
     return bdofs

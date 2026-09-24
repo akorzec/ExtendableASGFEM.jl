@@ -93,6 +93,7 @@ function main(;
         initial_modes = [[0], [1, 0], [0, 1], [2, 0], [0, 0, 1]], # initial multi-indices for the stochastic basis
         f! = (result, qpinfo) -> (result[1] = 1), # right-hand side
         use_iterative_solver = true,
+        calculate_error = true, # compute Monte Carlo error estimates (set false for quick solver-only runs)
         Plotter = UnicodePlots,
     )
 
@@ -116,24 +117,26 @@ function main(;
     solve!(problem, sol, C; rhs = f!, use_iterative_solver = use_iterative_solver)
 
     ## compute a Monte Carlo reference error estimate
-    weightederrorH1, weightederrorL2, uniformerrorH1, uniformerrorL2 = calculate_sampling_error(
-        sol,
-        C;
-        problem = problem,
-        rhs = f!,
-        order = order + 1,
-        nsamples = 50,
-    )
+    if calculate_error
+        weightederrorH1, weightederrorL2, uniformerrorH1, uniformerrorL2 = calculate_sampling_error(
+            sol,
+            C;
+            problem = problem,
+            rhs = f!,
+            order = order + 1,
+            nsamples = 50,
+        )
+
+        @info "RESULTS
+        || ∇(u-u_h) || (w,u) = $(sqrt(weightederrorH1[end])), $(sqrt(uniformerrorH1[end]))
+        || u - u_h || (w,u) = $(sqrt(weightederrorL2[end])), $(sqrt(uniformerrorL2[end]))"
+    end
 
     ## plot the stochastic modes if a plotting backend was requested
     if !isnothing(Plotter)
         p = plot_modes(sol; Plotter = Plotter, ncols = 4)
         display(p)
     end
-
-    @info "RESULTS
-        || ∇(u-u_h) || (w,u) = $(sqrt(weightederrorH1[end])), $(sqrt(uniformerrorH1[end]))
-        || u - u_h || (w,u) = $(sqrt(weightederrorL2[end])), $(sqrt(uniformerrorL2[end]))"
 
     return sol
 end

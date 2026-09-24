@@ -30,8 +30,10 @@ using IterativeSolvers: IterativeSolvers
 using Krylov: Krylov
 using LinearAlgebra: LinearAlgebra, SymTridiagonal, dot, eigvals, eigvecs,
     ldiv!, mul!, norm, lu
+using LinearSolve: LinearSolve, LinearProblem, KrylovJL_GMRES, solve
 using Printf: Printf, @printf
 using Random: Random, rand!
+using SciMLOperators: FunctionOperator
 using SparseArrays: SparseArrays, SparseMatrixCSC, nzrange, rowvals
 using SpecialFunctions: SpecialFunctions, zeta
 using StaticArrays: StaticArrays, SMatrix, SVector
