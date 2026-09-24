@@ -1,10 +1,28 @@
-#= 
-([source code](SOURCE_URL))
+#=
+Minimal example for a stochastic Poisson problem solved with stochastic Galerkin FEM.
 
-minimalistic script, that solves a stochastic Poisson problem on a uniform mesh
- 
-usage:
-- run main: main(; problem = problem, kwargs...)
+This script follows the standard workflow of the package:
+1. choose the stochastic coefficient,
+2. build the spatial grid and stochastic basis,
+3. solve the SGFEM problem,
+4. estimate the error by Monte Carlo sampling,
+5. plot the stochastic modes.
+
+Possible problem types:
+- `PoissonProblemPrimal`: standard Poisson problem with linear diffusion coefficient `a`
+- `LogTransformedPoissonProblemPrimal`: log-transformed Poisson problem with coefficient `exp(a)`
+- `LogTransformedPoissonProblemDual`: dual formulation of the log-transformed problem
+
+Typical usage:
+    include("scripts/poisson_simple.jl")
+    sol = PoissonSimple.main(
+        problem = LogTransformedPoissonProblemPrimal,
+        domain = "square",
+        nrefs = 3,
+        order = 2,
+        decay = 2.0,
+        mean = 0.0,
+    )
 =#
 
 module PoissonSimple
@@ -17,44 +35,42 @@ using GridVisualize
 using UnicodePlots
 using Term
 
-function main(;
-        problem = PoissonProblemPrimal,
-        nrefs = 3,      # number of uniform refinements of the initial grid
-        order = 2,      # polynomial order of the FEspaces
-        decay = 2.0,    # decay factor for the random coefficient
-        mean = problem == PoissonProblemPrimal ? 1.0 : 0.0, # mean value of coefficient
-        domain = "square",  # domain, e.g., "square" or "lshape"
-        initial_modes = [[0], [1, 0], [0, 1], [2, 0], [0, 0, 1]],   # initial multi-indices for stochastic basis
-        f! = (result, qpinfo) -> (result[1] = 1),       # right-hand side function
-        use_iterative_solver = true,    # use iterative solver ? (otherwise direct)
-        Plotter = UnicodePlots
-    )
-
-    ## prepare stochastic coefficient
+function coefficient_for_problem(problem; decay, mean)
     τ = (problem <: PoissonProblemPrimal) ? 0.9 : 1.0
     if problem <: PoissonProblemPrimal
-        @assert mean >= 1 "coefficient needs to be at least 1 to ensure ellipticity"
+        @assert mean >= 1 "coefficient mean value needs to be at least 1 to ensure ellipticity"
     end
-    C = StochasticCoefficientCosinus(; τ = τ, decay = decay, mean = mean)
+    return StochasticCoefficientCosinus(; τ = τ, decay = decay, mean = mean)
+end
 
-    ## prepare grid
-    xgrid = if domain == "square"
-        uniform_refine(grid_unitsquare(Triangle2D), nrefs)
+function make_grid(domain::String, nrefs)
+    if domain == "square"
+        return uniform_refine(grid_unitsquare(Triangle2D), nrefs)
     elseif domain == "lshape"
-        uniform_refine(grid_lshape(Triangle2D), nrefs)
+        return uniform_refine(grid_lshape(Triangle2D), nrefs)
     else
         error("unknown domain: $domain")
     end
+end
 
-    ## prepare stochastic basis
+function make_stochastic_basis(problem, initial_modes)
     multi_indices = Array{Array{Int, 1}, 1}(initial_modes)
     prepare_multi_indices!(multi_indices)
     M = maximum(length.(multi_indices))
-    OBType = problem <: PoissonProblemPrimal ? LegendrePolynomials : HermitePolynomials
-    ansatz_deg = maximum([maximum(multi_indices[k]) for k in 1:length(multi_indices)]) + 4
-    TensorBasis = TensorizedBasis(OBType, M, ansatz_deg, 2 * ansatz_deg, 2 * ansatz_deg, multi_indices = multi_indices)
+    polynomial_family = problem <: PoissonProblemPrimal ? LegendrePolynomials : HermitePolynomials
+    ansatz_degree = maximum([maximum(multi_indices[k]) for k in 1:length(multi_indices)]) + 4
+    stochastic_basis = TensorizedBasis(
+        polynomial_family,
+        M,
+        ansatz_degree,
+        2 * ansatz_degree,
+        2 * ansatz_degree;
+        multi_indices = multi_indices,
+    )
+    return stochastic_basis, multi_indices
+end
 
-    ## prepare FE spaces
+function make_fem_spaces(problem, xgrid, order)
     if problem <: LogTransformedPoissonProblemDual
         FEType = [HDIVRTk{2, order}, order == 0 ? L2P0{1} : H1Pk{1, 2, order}]
         FES = [FESpace{FEType[1]}(xgrid), FESpace{FEType[2]}(xgrid; broken = true)]
@@ -64,18 +80,52 @@ function main(;
         FES = FESpace{FEType}(xgrid)
         unames = ["u"]
     end
+    return FES, unames
+end
 
-    ## create solution vector
-    sol = SGFEVector(FES, TensorBasis; active_modes = 1:length(multi_indices), unames = unames)
+function main(;
+        problem = PoissonProblemPrimal, # one of: PoissonProblemPrimal, LogTransformedPoissonProblemPrimal, LogTransformedPoissonProblemDual
+        nrefs = 3,      # number of uniform refinements of the initial grid
+        order = 2,      # polynomial order of the FE spaces
+        decay = 2.0,    # decay factor for the random coefficient
+        mean = problem == PoissonProblemPrimal ? 1.0 : 0.0, # mean value of the coefficient
+        domain = "square",  # domain, e.g., "square" or "lshape"
+        initial_modes = [[0], [1, 0], [0, 1], [2, 0], [0, 0, 1]], # initial multi-indices for the stochastic basis
+        f! = (result, qpinfo) -> (result[1] = 1), # right-hand side
+        use_iterative_solver = true,
+        Plotter = UnicodePlots,
+    )
 
-    ## solve problem
+    ## build the stochastic coefficient
+    C = coefficient_for_problem(problem; decay = decay, mean = mean)
+
+    ## build the spatial mesh
+    xgrid = make_grid(domain, nrefs)
+
+    ## build the stochastic basis
+    tensor_basis, multi_indices = make_stochastic_basis(problem, initial_modes)
+
+    ## build the FE spaces
+    FES, unames = make_fem_spaces(problem, xgrid, order)
+
+    ## create the solution vector
+    sol = SGFEVector(FES, tensor_basis; active_modes = 1:length(multi_indices), unames = unames)
+
+    ## solve the stochastic Galerkin problem
     @info "Solving..."
     solve!(problem, sol, C; rhs = f!, use_iterative_solver = use_iterative_solver)
 
-    ## compute exact error (by MC sampling)
-    weightederrorH1, weightederrorL2, uniformerrorH1, uniformerrorL2 = calculate_sampling_error(sol, C; problem = problem, rhs = f!, order = order + 1, nsamples = 50)
+    ## compute a Monte Carlo reference error estimate
+    weightederrorH1, weightederrorL2, uniformerrorH1, uniformerrorL2 = calculate_sampling_error(
+        sol,
+        C;
+        problem = problem,
+        rhs = f!,
+        order = order + 1,
+        nsamples = 50,
+    )
 
-    ## plot solution
+    ## plot the stochastic modes if a plotting backend was requested
     if !isnothing(Plotter)
         p = plot_modes(sol; Plotter = Plotter, ncols = 4)
         display(p)
