@@ -207,6 +207,28 @@ function main()
         end
     end
 
+    @testset "residual-based estimator smoke test" begin
+        # small P2 solve, then run the primal residual estimator including the
+        # tail-extension and jump assembly paths
+        sol = PoissonSimple.main(
+            problem = PoissonProblemPrimal,
+            nrefs = 1,
+            order = 2,
+            domain = "square",
+            initial_modes = [[0], [1, 0], [0, 1]],
+            calculate_error = false,
+            Plotter = nothing,
+        )
+        C = PoissonSimple.coefficient_for_problem(PoissonProblemPrimal; decay = 2.0, mean = 1.0)
+        f! = (result, qpinfo) -> (result[1] = 1)
+        eta4modes, eta4cell, multi_indices_extended, ζ_data = estimate(PoissonProblemPrimal, sol, C; rhs = f!)
+        @test length(eta4modes) == length(multi_indices_extended)
+        @test length(multi_indices_extended) > sol.TB.nmodes # tail modes were added
+        @test all(isfinite, eta4modes)
+        @test all(>(0), view(eta4cell, :, 1))
+        @test ζ_data == 0.0
+    end
+
     return
 end
 

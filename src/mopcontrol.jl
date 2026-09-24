@@ -71,7 +71,6 @@ function add_boundary_modes(multi_indices; p_extension = 1, tail_extension = [10
             end
         end
     end
-    sleep(1)
     prepare_multi_indices!(multi_indices; minimal_length = last_nonzero + tail_extension[1])
     extended_multiindices = deepcopy(multi_indices)
     maxlength2 = maximum(length.(extended_multiindices))

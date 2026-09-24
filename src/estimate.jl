@@ -1,21 +1,19 @@
 function get_neighbours(OBT, multi_indices)
     M = length(multi_indices[1])
     nmodes = length(multi_indices)
+    idx4mode = Dict{NTuple{M,Int},Int}()
+    for k in 1:nmodes
+        idx4mode[(multi_indices[k]...,)] = k
+    end
     mneighboursPLUS = zeros(Int, M, nmodes)
     mneighboursMINUS = zeros(Int, M, nmodes)
     for j in 1:nmodes
+        mu = (multi_indices[j]...,)
         for m in 1:M
-            mu1 = deepcopy(multi_indices[j])
-            mu2 = deepcopy(multi_indices[j])
-            mu1[m] += 1
-            mu2[m] -= 1
-            for k in 1:nmodes
-                if all(multi_indices[k] .== mu1)
-                    mneighboursPLUS[m, j] = k
-                elseif all(multi_indices[k] .== mu2)
-                    mneighboursMINUS[m, j] = k
-                end
-            end
+            k = get(idx4mode, ntuple(mm -> mu[mm] + (mm == m), M), 0)
+            k > 0 && (mneighboursPLUS[m, j] = k)
+            k = get(idx4mode, ntuple(mm -> mu[mm] - (mm == m), M), 0)
+            k > 0 && (mneighboursMINUS[m, j] = k)
         end
     end
     return mneighboursPLUS, mneighboursMINUS
@@ -35,6 +33,68 @@ function get_next_tail(multi_indices, mode, startm, maxm)
     return false
 end
 
+## Cache for prepare_extended_modes (see its docstring). The entry type is Any because the
+## concrete types of TB_extended (ONB parameterized by polynomial family and degree) depend on
+## the basis and cannot be declared for a heterogeneous Dict; type stability for the callers is
+## recovered by type-annotating the fields when reading the entry back (see below).
+const _extended_modes_cache_maxlen = 4
+const _extended_modes_cache = Dict{Any, Any}()
+
+## Cache for the interpolations of <e^-a, H_nu> of the log-transformed estimator: they depend
+## only on (extended multi-indices, coefficient, interpolation order, grid), not on the current
+## solution vector. The grid enters via objectid and a hash of its coordinates so that in-place
+## mesh refinement (which the FEEvaluator's dofmap would not see) invalidates the entry.
+## Same Any-storage + ::-annotated readback scheme as _extended_modes_cache.
+const _lambda_interp_cache_maxlen = 2
+const _lambda_interp_cache = Dict{Any, Any}()
+
+"""
+    prepare_extended_modes(sol::SGFEVector; tail_extension = [10, 2])
+
+Shared estimator preparation: extend the multi-index set of `sol` by boundary/tail modes,
+rebuild the associated tensorized basis and precompute the mode neighbour tables.
+
+Since `TensorizedBasis` is immutable, the multi-index set plus `tail_extension` uniquely
+determine the result; it is therefore cached (few slots) and recomputed only once per
+basis extension, e.g. within an adaptive loop that calls the estimators repeatedly.
+
+# Returns
+`(multi_indices_extended, TB_extended, G, mneighboursPLUS, mneighboursMINUS, M_extended, nmodes_extended)`
+"""
+function prepare_extended_modes(sol::SGFEVector; tail_extension = [10, 2])
+    TB = sol.TB
+    ## cache key: (polynomial family, multi-index content, tail_extension).
+    ## The polynomial family must be part of the key since TB_extended (and the triple
+    ## products in its G matrix) depend on it; the multi-index content is safe to use as
+    ## part of the key because TensorizedBasis is immutable, so it cannot go stale.
+    cachekey = (OrthogonalPolynomialType(TB.ONB), Tuple.(TB.multi_indices)..., Tuple(tail_extension))
+    if !haskey(_extended_modes_cache, cachekey)
+        M = maxlength_multiindices(TB)
+        OBT = OrthogonalPolynomialType(TB.ONB)
+
+        ## extend multi_indices (note: add_boundary_modes mutates its argument)
+        multi_indices_extended = add_boundary_modes(deepcopy(TB.multi_indices); tail_extension = tail_extension)
+        M_extended = length(multi_indices_extended[1])
+        maxorder = maximum(maximum(multi_indices_extended[j]) for j in 1:length(multi_indices_extended))
+        TB_extended = TensorizedBasis(OBT, M + 1, maxorder, 2 * maxorder, 2 * maxorder, multi_indices = multi_indices_extended)
+        nmodes_extended = length(multi_indices_extended)
+        G = TB_extended.G
+
+        ## prepare neighbours of modes
+        mneighboursPLUS, mneighboursMINUS = get_neighbours(OBT, multi_indices_extended)
+
+        length(_extended_modes_cache) >= _extended_modes_cache_maxlen && empty!(_extended_modes_cache)
+        _extended_modes_cache[cachekey] = (multi_indices_extended, TB_extended, G, mneighboursPLUS, mneighboursMINUS, M_extended, nmodes_extended)
+    end
+    ## The cache stores Any, so read the entry back with ::-annotations: these are cheap
+    ## runtime type checks that simultaneously give the compiler concrete types for the
+    ## destructured return values (a bare return of the cache entry would type the callers'
+    ## G, mneighbours..., etc. as Any and break the type stability of the estimator loops).
+    cacheval = _extended_modes_cache[cachekey]
+    return (cacheval[1]::Vector{Vector{Int}}, cacheval[2]::TensorizedBasis{Float64}, cacheval[3]::ExtendableSparseMatrix{Float64, Int64},
+            cacheval[4]::Matrix{Int}, cacheval[5]::Matrix{Int}, cacheval[6]::Int, cacheval[7]::Int)
+end
+
 """
 $(TYPEDSIGNATURES)
 
@@ -46,7 +106,7 @@ Compute the residual-based a posteriori error estimator for a stochastic Galerki
 - `C::AbstractStochasticCoefficient`: The stochastic coefficient (random field or parameterization).
 - `rhs`: (Optional) Right-hand side function for the PDE (default: `nothing`).
 - `bonus_quadorder`: (Optional) Additional quadrature order for integration (default: 1).
-- `tail_extension`: (Optional) Number of additional boundary modes to include in the multi-index set (default: 5).
+- `tail_extension`: (Optional) Two-element vector controlling the boundary mode extension (default: `[10, 2]`, see `add_boundary_modes`).
 - `kwargs...`: Additional keyword arguments passed to the estimator.
 
 # Returns
@@ -54,6 +114,7 @@ A tuple containing:
 - `eta4modes::Vector{Float64}`: Total error estimator for each multi-index (stochastic mode), corresponding to the enriched set of multi-indices (with current active modes first).
 - `eta4cell::Matrix{Float64}`: Error estimator for each cell in the spatial grid (for spatial refinement), for each multi-index.
 - `multi_indices_extended`: The enriched set of multi-indices used in the computation (including boundary extensions).
+- `ζ_data::Float64`: Estimated data truncation error (0.0 if the estimator does not provide one).
 
 # Description
 This function computes a residual-based a posteriori error estimator for the current SGFEM solution. It supports both spatial and stochastic adaptivity by providing error indicators for each cell and each stochastic mode. The estimator is tailored to the model problem and the stochastic coefficient, and can be extended to include additional boundary modes for improved reliability.
@@ -63,11 +124,14 @@ If no specialized estimator is available for the given model problem type, an er
 """
 function estimate(::Type{AbstractModelProblem}, sol::SGFEVector, C::AbstractStochasticCoefficient; kwargs...)
     @error "no error estimator for the model problem type available"
-    return Vector{Float64}, Matrix{Float64}, [[0]]
+    return zeros(Float64, 0), zeros(Float64, 0, 0), [[0]], 0.0
 end
 
 
-function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = 5)
+function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = [10, 2])
+    if rhs === nothing
+        error("estimate: a right-hand side `rhs` is needed for the residual computation")
+    end
 
     FES = sol.FES_space[1]
     FEType = eltype(FES)
@@ -75,24 +139,15 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
     ncells = num_cells(xgrid)
     EG = xgrid[UniqueCellGeometries][1]
     TB = sol.TB
-    M = maxlength_multiindices(TB)
     nmodes = TB.nmodes
-    multi_indices = TB.multi_indices
-    OBT = OrthogonalPolynomialType(TB.ONB)
     order = get_polynomialorder(FEType, EG)
 
-    ## extend multi_indices
-    multi_indices_extended = add_boundary_modes(deepcopy(multi_indices); tail_extension = tail_extension)
-    M_extended = length(multi_indices_extended[1])
-    maxorder = maximum(maximum(multi_indices_extended[j]) for j in 1:length(multi_indices_extended))
-    TB_extended = TensorizedBasis(OBT, M + 1, maxorder, 2 * maxorder, 2 * maxorder, multi_indices = multi_indices_extended)
-    nmodes_extended = length(multi_indices_extended)
-    G = TB_extended.G
+    ## extend multi_indices, rebuild tensor basis and prepare mode neighbours
+    multi_indices_extended, TB_extended, G, mneighboursPLUS, mneighboursMINUS, M_extended, nmodes_extended = prepare_extended_modes(sol; tail_extension = tail_extension)
 
     Mcoeff = maxm(C)
-
-    ## prepare neighbours of modes
-    mneighboursPLUS, mneighboursMINUS = get_neighbours(OBT, multi_indices_extended)
+    ## coefficient modes beyond the coefficient's own expansion are identically zero
+    Mcoup = min(Mcoeff, M_extended)
 
     ## prepare quadrature rule
     quadorder = 2 * (order - 1) + bonus_quadorder
@@ -113,22 +168,53 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
     ndofs = FES.ndofs
     coeffs = sol.entries
 
-    ## prepare expansion of coefficient
-    expa_PCE!, lambda_μ! = expa_PCE_mop(TB_extended, C; factor = -1.0)
-
-    ## interpolate <e^-a, H_nu>
-    @info "interpolating <e^-a, H_nu> for all modes with quadorder = $quadorder"
-    FES_interp = FESpace{H1Pk{1, 2, quadorder}}(xgrid)
-    FEBasis_id = FEEvaluator(FES_interp, ExtendableFEMBase.Identity, qf)
-    idvals = FEBasis_id.cvals
-    expaf_interpolations = FEVector([FES_interp for j in 1:nmodes_extended])
-    for j in 1:nmodes_extended
-        interpolate!(expaf_interpolations[j], (result, qpinfo) -> lambda_μ!(result, qpinfo.x, j); quadorder = 2*quadorder)
+    ## interpolate <e^-a, H_nu> for all extended modes
+    ## This depends only on the extended tensor basis, the coefficient, the quadrature order
+    ## and the grid (not on the solution values), so the interpolations and the identity
+    ## FE-basis evaluator are reused across estimator calls until one of these changes.
+    ## As in _extended_modes_cache the entry is stored as Any and unpacked with ::-checks
+    ## below to keep the hot loop in barrier() type stable.
+    interpkey = (quadorder, multi_indices_extended, C, objectid(xgrid), hash(xgrid[Coordinates]))
+    if !haskey(_lambda_interp_cache, interpkey)
+        @info "interpolating <e^-a, H_nu> for all modes with quadorder = $quadorder"
+        ## expansion of the coefficient, lambda_μ!(result, x, μ) evaluates <e^-a, H_μ>(x)
+        expa_PCE!, lambda_μ! = expa_PCE_mop(TB_extended, C; factor = -1.0)
+        FES_interp = FESpace{H1Pk{1, 2, quadorder}}(xgrid)
+        FEBasis_id = FEEvaluator(FES_interp, ExtendableFEMBase.Identity, qf)
+        expaf_interpolations = FEVector([FES_interp for j in 1:nmodes_extended])
+        for j in 1:nmodes_extended
+            interpolate!(expaf_interpolations[j], (result, qpinfo) -> lambda_μ!(result, qpinfo.x, j); quadorder = 2*quadorder)
+        end
+        length(_lambda_interp_cache) >= _lambda_interp_cache_maxlen && empty!(_lambda_interp_cache)
+        _lambda_interp_cache[interpkey] = (FEBasis_id, expaf_interpolations, FES_interp[CellDofs], FES_interp.ndofs, get_ndofs(ON_CELLS, H1Pk{1, 2, quadorder}, EG))
     end
-    offset_interp = FES_interp.ndofs
-    celldofs_interp = FES_interp[CellDofs]
-    ndofs4cell_interp = get_ndofs(ON_CELLS, H1Pk{1, 2, quadorder}, EG)
+    cacheval = _lambda_interp_cache[interpkey]
+    FEBasis_id = cacheval[1]::ExtendableFEMBase.SingleFEEvaluator{Float64}
+    idvals = FEBasis_id.cvals
+    expaf_interpolations = cacheval[2]::FEVector{Float64}
+    celldofs_interp = cacheval[3]::Union{VariableTargetAdjacency{Int32}, SerialVariableTargetAdjacency{Int32}, Array{Int32, 2}}
+    offset_interp = cacheval[4]::Int
+    ndofs4cell_interp = cacheval[5]::Int
     coeffs_interp = expaf_interpolations.entries
+
+    ## precompute the mode coupling structure of sigma_h: for each mode j, the list of
+    ## (coefficient index m, solution mode k, triple-product weight g) with g != 0 such
+    ## that the sigma term of the mode-j residual reads sum_(m,k,g) g * grad(a_m) * grad(u_k)
+    neighbours4mode = [Tuple{Int, Int, Float64}[] for j in 1:nmodes_extended]
+    for j in 1:nmodes_extended
+        for m in 1:Mcoup
+            for k in (mneighboursPLUS[m, j], mneighboursMINUS[m, j])
+                if 0 < k <= nmodes
+                    g = G[(m - 1) * nmodes_extended + j, k]
+                    if g != 0
+                        push!(neighbours4mode[j], (m, k, g))
+                    end
+                end
+            end
+        end
+    end
+    ## modes whose residual gains the Δu_h term (requires second derivatives of the FE basis)
+    add_lap4j = [order > 1 && j <= nmodes for j in 1:nmodes_extended]
 
     ## compute volume terms
     f4modes = zeros(Float64, nmodes_extended)
@@ -137,12 +223,11 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
     ζ_data1 = 0.0
     ζ_data2 = 0.0
     function barrier(EG, L2G::L2GTransformer)
-        lambda_temp = zeros(Float64, 1)
         gradam = zeros(Float64, 2)
+        gradamvals = zeros(Float64, 2, Mcoup)
         am = zeros(Float64, 1)
         kmL2 = 0.0
         ftemp = zeros(Float64, 1)
-        sigmatemp = zeros(Float64, 1)
         x = zeros(Float64, 2)
 
         for cell in 1:ncells
@@ -153,9 +238,17 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
             end
             update_trafo!(L2G, cell)
 
-            # compute ζ_data
             for qp in 1:nweights
                 eval_trafo!(x, L2G, xref[qp])
+
+                ## evaluate all coefficient gradients once per quadrature point
+                for m in 1:Mcoup
+                    get_gradam!(gradam, x, m, C)
+                    gradamvals[1, m] = gradam[1]
+                    gradamvals[2, m] = gradam[2]
+                end
+
+                # compute ζ_data
                 kmL2 = 0.0
                 for m in 1:Mcoeff
                     am[1] = 0
@@ -164,54 +257,47 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
                 end
                 rhs(ftemp, x)
                 ζ_data1 += ftemp[1]^2 * exp(2*kmL2) * weights[qp] * cellvolumes[cell]
+                fval = ftemp[1]
+
+                ## h_T|| f_nu + \sigma_\nu ||
                 for j in 1:nmodes_extended
-                    lambda_temp = 0.0
+                    ## evaluate <e^-a, H_nu>(x_qp) from its interpolation
+                    # (instead of the much more expensive lambda_μ!(result, x, j))
+                    lambda_val = 0.0
                     for d in 1:ndofs4cell_interp
                         dof = (j - 1) * offset_interp + celldofs_interp[d, cell]
-                        lambda_temp += idvals[1, d, qp] * coeffs_interp[dof]
+                        lambda_val += idvals[1, d, qp] * coeffs_interp[dof]
                     end
-                    ζ_data2 += lambda_temp^2 * ftemp[1]^2 * weights[qp] * cellvolumes[cell]
+                    ζ_data2 += lambda_val^2 * fval^2 * weights[qp] * cellvolumes[cell]
+
+                    ## residual f_nu = <e^-a f, H_nu> + Δu_h (the latter only for P_k, k > 1)
+                    res = lambda_val * fval
+                    if add_lap4j[j]
+                        for d in 1:ndofs4cell
+                            dof = (j - 1) * ndofs + celldofs[d, cell]
+                            res += coeffs[dof] * Δvals[1, d, qp]
+                        end
+                    end
+
+                    ## sigma term via the precomputed coupling lists
+                    sigma_val = 0.0
+                    for (m, k, g) in neighbours4mode[j]
+                        gax = gradamvals[1, m]
+                        gay = gradamvals[2, m]
+                        koff = (k - 1) * ndofs
+                        dudg = 0.0
+                        for d in 1:ndofs4cell
+                            dudg += coeffs[koff + celldofs[d, cell]] * (gax * ∇vals[1, d, qp] + gay * ∇vals[2, d, qp])
+                        end
+                        sigma_val += g * dudg
+                    end
+                    eta4cell[cell, j] += (res + sigma_val)^2 * weights[qp]
+                    f4modes[j] += res^2 * weights[qp] * cellvolumes[cell]
                 end
             end
 
-
+            ## boundary modes enjoy no Galerkin orthogonality and therefore have no additional h power
             for j in 1:nmodes_extended
-                ## h_T|| f_nu + \sigma_\nu ||
-
-                ## evaluate <e^-a f, H_nu> = lambda_nu * f
-                for qp in 1:nweights
-                    eval_trafo!(x, L2G, xref[qp])
-                    lambda_temp = 0.0
-                    for d in 1:ndofs4cell_interp
-                        dof = (j - 1) * offset_interp + celldofs_interp[d, cell]
-                        lambda_temp += idvals[1, d, qp] * coeffs_interp[dof]
-                    end
-                    #lambda_μ!(lambda_temp, x, j) # most expensive line
-                    rhs(ftemp, x)
-                    ftemp[1] = lambda_temp[1] * ftemp[1]
-                    if order > 1 && j <= nmodes
-                        for d in 1:ndofs4cell
-                            dof = (j - 1) * ndofs + celldofs[d, cell]
-                            ftemp[1] += coeffs[dof] * Δvals[1, d, qp]
-                        end
-                    end
-
-                    sigmatemp[1] = 0
-                    for m in 1:M_extended
-                        get_gradam!(gradam, x, m, C)
-                        for d in 1:ndofs4cell
-                            dofplus = mneighboursPLUS[m, j] <= nmodes ? (mneighboursPLUS[m, j] - 1) * ndofs + celldofs[d, cell] : 0
-                            dofminus = mneighboursMINUS[m, j] <= nmodes ? (mneighboursMINUS[m, j] - 1) * ndofs + celldofs[d, cell] : 0
-                            coeffPLUS = dofplus > 0 ? coeffs[dofplus] * G[(m - 1) * nmodes_extended + j, mneighboursPLUS[m, j]] : 0.0
-                            coeffMINUS = dofminus > 0 ? coeffs[dofminus] * G[(m - 1) * nmodes_extended + j, mneighboursMINUS[m, j]] : 0.0
-                            sigmatemp[1] += (coeffPLUS + coeffMINUS) * dot(gradam, view(∇vals, :, d, qp))
-                        end
-                    end
-                    eta4cell[cell, j] += (ftemp[1] + sigmatemp[1])^2 * weights[qp]
-                    f4modes[j] += ftemp[1]^2 * weights[qp] * cellvolumes[cell]
-                end
-
-                ## boundary modes enjoy no Galerkin orthogonality and therefore have no additional h power
                 if j <= nmodes
                     eta4cell[cell, j] *= cellvolumes[cell]^2
                 else
@@ -239,10 +325,11 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
         sol_j.entries .= view(sol[j])
         jumps4face = ExtendableFEM.evaluate(JumpIntegrator, sol_j)
         jumps4face[1, :] .*= xgrid[FaceVolumes]
-        for cell in 1:ncells, f in 1:3
+        for cell in 1:ncells, f in 1:size(cellfaces, 1)
             eta4cell[cell, j] += jumps4face[cellfaces[f, cell]]
         end
-        eta4modes[j] += sqrt(eta4modes[j]^2 + sum(view(jumps4face, :)))
+        ## merge jump contribution in quadratic norm
+        eta4modes[j] = sqrt(eta4modes[j]^2 + sum(view(jumps4face, :)))
     end
 
     ζ_data = ζ_data1-ζ_data2
@@ -257,7 +344,10 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
 end
 
 
-function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = 5)
+function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = [10, 2])
+    if rhs === nothing
+        error("estimate: a right-hand side `rhs` is needed for the residual computation")
+    end
 
     FES = sol.FES_space[1]
     FEType = eltype(FES)
@@ -265,22 +355,14 @@ function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStoc
     ncells = num_cells(xgrid)
     EG = xgrid[UniqueCellGeometries][1]
     TB = sol.TB
-    M = maxlength_multiindices(TB)
     nmodes = TB.nmodes
-    multi_indices = TB.multi_indices
-    OBT = OrthogonalPolynomialType(TB.ONB)
     order = get_polynomialorder(FEType, EG)
 
-    ## extend multi_indices
-    multi_indices_extended = add_boundary_modes(deepcopy(multi_indices); tail_extension = tail_extension)
-    M_extended = length(multi_indices_extended[1])
-    maxorder = maximum(maximum(multi_indices_extended[j]) for j in 1:length(multi_indices_extended))
-    TB_extended = TensorizedBasis(OBT, M + 1, maxorder, 2 * maxorder, 2 * maxorder, multi_indices = multi_indices_extended)
-    nmodes_extended = length(multi_indices_extended)
-    G = TB_extended.G
+    ## extend multi_indices, rebuild tensor basis and prepare mode neighbours
+    multi_indices_extended, TB_extended, G, mneighboursPLUS, mneighboursMINUS, M_extended, nmodes_extended = prepare_extended_modes(sol; tail_extension = tail_extension)
 
-    ## prepare neighbours of modes
-    mneighboursPLUS, mneighboursMINUS = get_neighbours(OBT, multi_indices_extended)
+    ## coefficient modes beyond the coefficient's own expansion are identically zero
+    Mcoup = min(maxm(C), M_extended)
 
     ## prepare quadrature rule
     quadorder = 2 * (order - 1) + bonus_quadorder
@@ -291,9 +373,7 @@ function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStoc
     cellvolumes = xgrid[CellVolumes]
 
     ## prepare FE basis evaluator and dofmap
-    FEBasis_∇ = FEEvaluator(FES, Gradient, qf)
     FEBasis_Δ = FEEvaluator(FES, Laplacian, qf)
-    ∇vals = FEBasis_∇.cvals
     Δvals = FEBasis_Δ.cvals
     L2G = L2GTransformer(EG, xgrid, ON_CELLS)
     celldofs = FES[CellDofs]
@@ -301,57 +381,87 @@ function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStoc
     ndofs = FES.ndofs
     coeffs = sol.entries
 
+    ## precompute the mode-wise coupling structure of div(a grad u_h): for each mode j,
+    ## the list of (coefficient index m, solution mode k, triple-product weight g) such
+    ## that the mode-j residual reads f_nu + sum_m a_m * sum_(m,k,g) g * Laplace(u_k)
+    neighbours4mode = [Tuple{Int, Int, Float64}[] for j in 1:nmodes_extended]
+    for j in 1:nmodes_extended
+        if j <= nmodes
+            push!(neighbours4mode[j], (0, j, 1.0))
+        end
+        for m in 1:Mcoup
+            for k in (mneighboursPLUS[m, j], mneighboursMINUS[m, j])
+                if 0 < k <= nmodes
+                    g = G[(m - 1) * nmodes_extended + j, k]
+                    if g != 0
+                        push!(neighbours4mode[j], (m, k, g))
+                    end
+                end
+            end
+        end
+    end
+
     ## compute volume terms
     eta4cell = zeros(Float64, ncells, nmodes_extended)
     eta4modes = zeros(Float64, nmodes_extended)
-    f4modes = zeros(Float64, nmodes_extended)
+    ## local wrapper function: keeps the hot loop in a type-stable local scope
     function barrier(EG, L2G::L2GTransformer)
-        lambda_temp = zeros(Float64, 1)
-        am = zeros(Float64, 1)
+        amtmp = zeros(Float64, 1)
+        amvals = zeros(Float64, Mcoup + 1)
         ftemp = zeros(Float64, 1)
-        sigmatemp = zeros(Float64, 1)
         x = zeros(Float64, 2)
+        lap4mode = zeros(Float64, nmodes, nweights)
 
         for cell in 1:ncells
-            update_basis!(FEBasis_∇, cell)
             if order > 1
                 update_basis!(FEBasis_Δ, cell)
             end
             update_trafo!(L2G, cell)
-            for j in 1:nmodes_extended
-                ## h_T|| f_nu + div \sigma_\nu ||
-
+            if order > 1
+                ## Laplace(u_k)(x_qp) depends only on (cell, k, qp): precompute once per cell
+                for k in 1:nmodes
+                    koff = (k - 1) * ndofs
+                    for qp in 1:nweights
+                        lap = 0.0
+                        for d in 1:ndofs4cell
+                            lap += coeffs[koff + celldofs[d, cell]] * Δvals[1, d, qp]
+                        end
+                        lap4mode[k, qp] = lap
+                    end
+                end
                 for qp in 1:nweights
                     eval_trafo!(x, L2G, xref[qp])
 
-                    ftemp[1] = 0
-                    if j == 1
-                        rhs(ftemp, x)
+                    ## evaluate all coefficient functions a_m(x) once per quadrature point
+                    for m in 0:Mcoup
+                        get_am!(amtmp, x, m, C)
+                        amvals[m + 1] = amtmp[1]
                     end
-                    if order > 1
-                        if j <= nmodes
-                            get_am!(am, x, 0, C)
-                            for d in 1:ndofs4cell
-                                dof = (j - 1) * ndofs + celldofs[d, cell]
-                                ftemp[1] += coeffs[dof] * am[1] * Δvals[1, d, qp]
-                            end
-                        end
-                        for m in 1:M_extended
-                            get_am!(am, x, m, C)
-                            for d in 1:ndofs4cell
-                                dofplus = mneighboursPLUS[m, j] <= nmodes ? (mneighboursPLUS[m, j] - 1) * ndofs + celldofs[d, cell] : 0
-                                dofminus = mneighboursMINUS[m, j] <= nmodes ? (mneighboursMINUS[m, j] - 1) * ndofs + celldofs[d, cell] : 0
-                                coeffPLUS = dofplus > 0 ? coeffs[dofplus] * G[(m - 1) * nmodes_extended + j, mneighboursPLUS[m, j]] : 0.0
-                                coeffMINUS = dofminus > 0 ? coeffs[dofminus] * G[(m - 1) * nmodes_extended + j, mneighboursMINUS[m, j]] : 0.0
-                                ftemp[1] += (coeffPLUS + coeffMINUS) * am[1] * Δvals[1, d, qp]
-                            end
-                        end
-                    end
-                    eta4cell[cell, j] += ftemp[1]^2 * weights[qp]
-                    f4modes[j] += ftemp[1]^2 * weights[qp] * cellvolumes[cell]
-                end
+                    rhs(ftemp, x)
 
-                ## boundary modes enjoy no Galerkin orthogonality and therefore have no additional h power
+                    ## h_T|| f_nu + div \sigma_\nu ||
+                    for j in 1:nmodes_extended
+                        res = j == 1 ? ftemp[1] : 0.0
+                        for (m, k, g) in neighbours4mode[j]
+                            res += amvals[m + 1] * g * lap4mode[k, qp]
+                        end
+                        eta4cell[cell, j] += res^2 * weights[qp]
+                    end
+                end
+            else
+                ## P1: the element-wise Laplacian vanishes, only the deterministic rhs contributes
+                for qp in 1:nweights
+                    eval_trafo!(x, L2G, xref[qp])
+                    rhs(ftemp, x)
+                    eta4cell[cell, 1] += ftemp[1]^2 * weights[qp]
+                end
+            end
+
+            ## mesh-size scaling (h_T ~ sqrt(|T|) in 2D): the reference quadrature weights only
+            ## provide the cell mean of the squared residual, and interior modes gain two
+            ## additional powers of h_T from Galerkin orthogonality;
+            ## boundary modes enjoy no Galerkin orthogonality and therefore have no additional h power
+            for j in 1:nmodes_extended
                 if j <= nmodes
                     eta4cell[cell, j] *= cellvolumes[cell]^3
                 else
@@ -367,7 +477,12 @@ function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStoc
 
     barrier(EG, L2G)
 
-    ## compute normal jumps, todo: am is missing
+    ## compute normal jumps of a grad u_h.
+    ## Linearity trick: instead of assembling the flux sum_m a_m * sum_k g*u_k of each mode j
+    ## (one FaceInterpolator sweep per mode and coefficient), evaluate a_m * jump(grad u_k)
+    ## at the face quadrature points only for the distinct (m, k) pairs that actually occur
+    ## in the coupling lists neighbours4mode = (m, k, g), and form the mode-j flux values as
+    ## linear combination of these stored pair values (the (0, j, 1.0) entries cover a_0*grad u_j)
     sol_j = FEVector(FES)
     cellfaces = xgrid[CellFaces]
     jumps4face = zeros(Float64, 1, size(xgrid[FaceNodes], 2))
@@ -376,30 +491,46 @@ function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStoc
     JumpEvaluator = FaceInterpolator((result, input, qpinfo) -> (get_am!(result, qpinfo.x, m_pointer[1], C); result .= result[1] * input), [jump(grad(1))], quadorder = quadorder)
     ExtendableFEM.build_assembler!(JumpEvaluator, [sol_j[1]])
     sol_jumps = deepcopy(JumpEvaluator.value)
+    nquadvals = length(JumpEvaluator.value.entries)
+
+    ## enumerate the needed (coefficient, solution mode) pairs
+    idx4pair = zeros(Int, Mcoup + 1, nmodes)
+    pairs = Tuple{Int, Int}[]
+    for j in 1:nmodes_extended
+        for (m, k, g) in neighbours4mode[j]
+            if idx4pair[m + 1, k] == 0
+                push!(pairs, (m, k))
+                idx4pair[m + 1, k] = length(pairs)
+            end
+        end
+    end
+    pairvalues = zeros(Float64, length(pairs), nquadvals)
+    for (i, (m, k)) in enumerate(pairs)
+        sol_j.entries .= view(sol[k])
+        m_pointer[1] = m
+        ExtendableFEM.evaluate!(JumpEvaluator, sol_j)
+        pairvalues[i, :] .= JumpEvaluator.value.entries
+    end
+
     JumpIntegrator = L2NormIntegrator([id(1)]; entities = ON_FACES)
     bfaces = xgrid[BFaceFaces]
+    sigmavalues = zeros(Float64, nquadvals)
 
-    @time for j in 1:nmodes_extended
-        fill!(sol_jumps[1], 0)
-        for m in 0:M_extended
-            fill!(sol_j[1], 0)
-            if m == 0 && j <= nmodes
-                sol_j.entries .+= view(sol[j])
-            elseif m > 0
-                if mneighboursPLUS[m, j] > 0 && mneighboursPLUS[m, j] <= nmodes
-                    sol_j.entries .+= view(sol[mneighboursPLUS[m, j]]) * G[(m - 1) * nmodes_extended + j, mneighboursPLUS[m, j]]
-                end
-                if mneighboursMINUS[m, j] > 0 && mneighboursMINUS[m, j] <= nmodes
-                    sol_j.entries .+= view(sol[mneighboursMINUS[m, j]]) * G[(m - 1) * nmodes_extended + j, mneighboursMINUS[m, j]]
-                end
+    for j in 1:nmodes_extended
+        ## pointwise flux values sum_(m,k,g) g * a_m * jump(grad u_k) at the face quadrature points
+        fill!(sigmavalues, 0)
+        for (m, k, g) in neighbours4mode[j]
+            prow = view(pairvalues, idx4pair[m + 1, k], :)
+            for ii in 1:nquadvals
+                sigmavalues[ii] += g * prow[ii]
             end
-            m_pointer[1] = m
-            ExtendableFEM.evaluate!(JumpEvaluator, sol_j)
-            sol_jumps.entries .+= JumpEvaluator.value.entries
         end
+        sol_jumps.entries .= sigmavalues
         jumps4face .= sum(ExtendableFEM.evaluate(JumpIntegrator, sol_jumps), dims = 1)
         jumps4face[1, bfaces] .= 0
 
+        ## jump scaling with edge size h_F ~ |F|: interior modes get one power of h_F,
+        ## tail modes (no Galerkin orthogonality) an inverse power
         if j <= nmodes
             jumps4face[1, :] .*= xgrid[FaceVolumes]
         else
@@ -407,14 +538,15 @@ function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStoc
         end
 
         for cell in 1:ncells
-            for f in 1:3
+            for f in 1:size(cellfaces, 1)
                 eta4cell[cell, j] += jumps4face[cellfaces[f, cell]]
             end
         end
         eta4modes[j] = sqrt(eta4modes[j]^2 + sum(view(jumps4face, :)))
     end
 
-    return eta4modes, eta4cell, multi_indices_extended #, f4modes
+    ## no data truncation estimate for this problem (4th slot keeps the return signature uniform)
+    return eta4modes, eta4cell, multi_indices_extended, 0.0
 end
 
 
@@ -604,7 +736,11 @@ end
 
 ## this function computes the local equilibrated fluxes
 ## by solving local problems on (disjunct groups of) node patches
-function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; FETypeDual = nothing, rhs = nothing, tail_extension = 5, bonus_quadorder = 0)
+function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; FETypeDual = nothing, rhs = nothing, tail_extension = [10, 2], bonus_quadorder = 0)
+    if rhs === nothing
+        error("estimate_equilibration: a right-hand side `rhs` is needed for the residual computation")
+    end
+
     ## needed grid stuff
     FES = sol.FES_space[1]
     ndofs = FES.ndofs
@@ -629,24 +765,15 @@ function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C
 
     ## extract tensor basis
     TB = sol.TB
-    M = maxlength_multiindices(TB)
     nmodes = TB.nmodes
-    multi_indices = TB.multi_indices
-    OBT = OrthogonalPolynomialType(TB.ONB)
 
-    ## extend multi_indices
-    multi_indices_extended = add_boundary_modes(deepcopy(multi_indices); tail_extension = tail_extension)
-    M_extended = length(multi_indices_extended[1])
-    maxorder = maximum(maximum(multi_indices_extended[j]) for j in 1:length(multi_indices_extended))
-    TB_extended = TensorizedBasis(OBT, M + 1, maxorder, 2 * maxorder, 2 * maxorder, multi_indices = multi_indices_extended)
-    nmodes_extended = length(multi_indices_extended)
-    G = TB_extended.G
+    ## extend multi_indices, rebuild tensor basis and prepare mode neighbours
+    multi_indices_extended, TB_extended, G, mneighboursPLUS, mneighboursMINUS, M_extended, nmodes_extended = prepare_extended_modes(sol; tail_extension = tail_extension)
 
-    ## prepare neighbours of modes
-    mneighboursPLUS, mneighboursMINUS = get_neighbours(OBT, multi_indices_extended)
+    ## coefficient modes beyond the coefficient's own expansion are identically zero
+    Mcoup = min(maxm(C), M_extended)
 
     ## append block in solution vector for equilibrated fluxes
-    sol_eq = FEVector(FESDual)
     sol_eq = SGFEVector(FESDual, TB_extended; active_modes = 1:length(multi_indices_extended))
 
     ## partition of unity and their gradients = P1 basis functions
@@ -766,7 +893,7 @@ function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C
                                 coeffs_uh[d] += coeffs[dof] * am[1]
                             end
                         end
-                        for m in 1:M_extended
+                        for m in 1:Mcoup
                             get_am!(am, x, m, C)
                             for d in 1:maxdofs_uh
                                 dofplus = mneighboursPLUS[m, mode] <= nmodes ? (mneighboursPLUS[m, mode] - 1) * ndofs + celldofs[d, cell] : 0
@@ -907,7 +1034,7 @@ function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C
                             end
                         end
                     end
-                    for m in 1:M_extended
+                    for m in 1:Mcoup
                         get_am!(am, x, m, C)
                         for d in 1:maxdofs_uh
                             dofplus = mneighboursPLUS[m, j] <= nmodes ? (mneighboursPLUS[m, j] - 1) * ndofs + celldofs[d, cell] : 0
@@ -950,5 +1077,6 @@ function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C
         eta4modes[j] = sqrt(sum(view(eta4cell, :, j)))
     end
 
-    return eta4modes, eta4cell, multi_indices_extended #, f4modes
+    ## no data truncation estimate (4th slot keeps the return signature uniform)
+    return eta4modes, eta4cell, multi_indices_extended, 0.0
 end
