@@ -32,3 +32,15 @@ Modules = [ExtendableASGFEM]
 Pages = ["modelproblems/solvers_poisson_primal.jl"]
 Order   = [:type, :function]
 ```
+
+## Log-Transformed Poisson Solvers
+
+The matrix-free solvers of the log-transformed problems follow the same pattern as the primal solver:
+the system operator only implements `LinearAlgebra.mul!`, with the nonzero coupling coefficients of `G`
+precomputed into a list so that vanishing couplings are never iterated over.
+
+```@autodocs
+Modules = [ExtendableASGFEM]
+Pages = ["modelproblems/solvers_logpoisson_primal.jl", "modelproblems/solvers_logpoisson_dual.jl"]
+Order   = [:type, :function]
+```
