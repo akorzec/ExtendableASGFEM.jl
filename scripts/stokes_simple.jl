@@ -73,7 +73,7 @@ function prepare_data_for_example_with_analytical_solution(rc::RunConfiguration;
                 exact_func_for_fixed_stochastic_input! = exact_func!(sample_pointer)
                 return function (result, input, qpinfo)
                     exact_func_for_fixed_stochastic_input!(result, qpinfo)
-                    result[1] = sqrt(sum((result - input) .^ 2))
+                    result[1] = sum((result - input) .^ 2)
                     return nothing
                 end
             end
@@ -150,7 +150,7 @@ function create_plot(
         linestyles = [:dot, :dashdot, :dashdotdot]
         for i in 1:3
             scatterlines!(
-                xdata, xdata .^ (-i), label = L"\mathcal{O}(h^{%$(-i)})", color = :gray,
+                xdata, xdata .^ (-i / 2), label = L"\mathcal{O}(h^{%$(-i)})", color = :gray,
                 markersize = 0, linewidth = 2, linestyle = linestyles[i],
             )
         end
@@ -403,7 +403,7 @@ function runner_convergence_plot(rc::RunConfiguration; kwargs...)
         )
 
         l2stress_error, l2u_error, l2p_error = calculate_sampling_error_2(
-            SolutionSGFEM, exact_f!, C; problem = StokesProblemPrimal, nsamples = 100, order = 2,
+            SolutionSGFEM, exact_f!, C; problem = StokesProblemPrimal, nsamples = 5, order = 2,
             metrics_configuration = stokes_metrics_configuration, dimensionwise_error = true,
         )
 
@@ -417,7 +417,7 @@ function runner_convergence_plot(rc::RunConfiguration; kwargs...)
             ylabel = L"error measured in $L^2$-norm", plot_path = kwargs[:plot_path], position = :rt,
             title = reconstruct ? L"\text{Convergence plot for the complex example with reconstruction operator}"
                 : L"\text{Convergence plot for the complex example without reconstruction operator}",
-            labels = [L"\|u - u_h\|_{L^2}", L"\|∇(u - u_h)\|_{L^2}", L"\|p - p_h\|_{L^2}"], show_optimal_rate = true,
+            labels = [L"\|∇(u - u_h)\|_{L^2}", L"\|u - u_h\|_{L^2}", L"\|p - p_h\|_{L^2}"], show_optimal_rate = true,
         )
     end
 
@@ -466,8 +466,8 @@ run_configuration_show_modes_complex_example = RunConfiguration(
     [[0], [1], [2], [3]],
     runner_plot_modes_for_solution,
     [
-        Dict(:α => 10.0^(-6), :FETypes => (H1BR{2}, L2P0{1}), :nrefs => 4, :reconstruct => false),
-        Dict(:α => 10.0^(-6), :FETypes => (H1BR{2}, L2P0{1}), :nrefs => 4, :reconstruct => true),
+        Dict(:α => 10.0^(-6), :FETypes => (H1BR{2}, L2P0{1}), :nrefs => 3, :reconstruct => false),
+        Dict(:α => 10.0^(-6), :FETypes => (H1BR{2}, L2P0{1}), :nrefs => 3, :reconstruct => true),
     ]
 )
 
