@@ -346,7 +346,7 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
 end
 
 
-function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = [10, 2])
+function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, p! = nothing, bonus_quadorder = 1, tail_extension = [10, 2])
     if rhs === nothing
         error("estimate: a right-hand side `rhs` is needed for the residual computation")
     end
@@ -553,13 +553,16 @@ function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStoc
     return eta4modes, eta4cell, multi_indices_extended, 0.0
 end
 
-function estimate(::Type{StokesProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, rhs_curl = nothing, bonus_quadorder = 1, tail_extension = 5, reconstruct = true)
+function estimate(::Type{StokesProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs! = nothing, rhs_curl! = nothing, ∇p! = nothing, bonus_quadorder = 1, tail_extension = 5, reconstruct = true)
     # ToDo: reconstruct übergeben
-    if isnothing(rhs)
-        error("estimate: a right-hand side `rhs` is needed for the residual computation")
+    if isnothing(rhs!)
+        error("estimate: a right-hand side `rhs!` is needed for the residual computation")
     end
-    if isnothing(rhs_curl)
-        error("estimate: the curl `rhs_curl` of the `rhs` is needed for the residual computation")
+    if isnothing(rhs_curl!)
+        error("estimate: `rhs_curl!` is needed for the residual computation")
+    end
+    if isnothing(∇p!)
+        error("estimate for reconstruct = true requires ∇p!")
     end
 
     FES = sol.FES_space[1]
@@ -592,6 +595,8 @@ function estimate(::Type{StokesProblemPrimal}, sol::SGFEVector, C::AbstractStoch
     ## prepare FE basis evaluator and dofmap
     FEBasis_Δ = FEEvaluator(FES, Laplacian, qf)
     Δvals = FEBasis_Δ.cvals
+    FEBasis_div = FEEvaluator(FES, Divergence, qf)
+    div_vals = FEBasis_div.cvals
     L2G = L2GTransformer(EG, xgrid, ON_CELLS)
     celldofs = FES[CellDofs]
     ndofs4cell::Int = get_ndofs(ON_CELLS, FEType, EG)
@@ -623,11 +628,6 @@ function estimate(::Type{StokesProblemPrimal}, sol::SGFEVector, C::AbstractStoch
     #     η_jump,2(σ_μ) = ||h_E^(3/2) [(f_μ + div σ_μ) ⋅ τ_E]||_{L^2(E^∘)}
     #     η_cons,1(σ_μ) = ||div σ_μ ∘ (1 - Π)||_{V'_{h, 0}}
 
-    η_cons0_integrator = L2NormIntegrator(
-        [div(1)]; quadorder = 2
-    )
-    # TODO: Implement η_cons0 for stochastic(!) Stokes
-
     ## compute volume terms
     eta4cell = zeros(Float64, ncells, nmodes_extended)
     eta4cell_2 = zeros(Float64, ncells, nmodes_extended)
@@ -637,11 +637,14 @@ function estimate(::Type{StokesProblemPrimal}, sol::SGFEVector, C::AbstractStoch
         amtmp = zeros(Float64, 1)
         amvals = zeros(Float64, Mcoup + 1)
         ftemp = zeros(Float64, 2)
+        ptemp = zeros(Float64, 1)
         x = zeros(Float64, 2)
         lap = zeros(Float64, 2)
+        div = 0
         res = zeros(Float64, 2)
 
         lap4mode = zeros(Float64, 2, nmodes, nweights)
+        div4mode = zeros(Float64, nmodes, nweights)
 
         for cell in 1:ncells
             update_trafo!(L2G, cell)
@@ -650,20 +653,15 @@ function estimate(::Type{StokesProblemPrimal}, sol::SGFEVector, C::AbstractStoch
                     #     η_curl(σ_μ)   = ||h_T^2 curl(f_μ + div σ_μ)||_{L^2(D)}
                     ## If velocity space is order 1: ||h_T^2 curl(f_μ + div σ_μ)|| = ||h_T^2 curl f_μ||
                     eval_trafo!(x, L2G, xref[qp])
-                    rhs_curl(ftemp, x)
-                    eta4cell[cell, 1] += ftemp[1]^2 * weights[qp]
+                    rhs_curl!(ftemp, x)
+                    eta4cell[cell, 1] += (ftemp[1]^2 + ftemp[2]^2) * weights[qp]
                 else
                     # ToDo: Implement error term for non-pressure-robust case
+                    eval_trafo!(x, L2G, xref[qp])
+                    rhs!(ftemp, x)
+                    ∇p!(ptemp, x)
+                    eta4cell[cell, 1] += (ftemp[1]^2 + ftemp[2]^2 + ptemp[1]^2 + ptemp[2]^2) * weights[qp]
                 end
-
-                """
-                for j in 1:nmodes_extended
-                    for d in 1:ndofs4cell
-                        dof = celldofs[d, cell] # (j - 1) * ndofs + celldofs[d, cell]
-                        eta4cell[cell, 1] += coeffs[dof] * Δvals[1, d, qp]
-                    end
-                end
-                """
 
                 # η_cons,1(σ_μ) calculation
                 for k in 1:nmodes
@@ -673,8 +671,10 @@ function estimate(::Type{StokesProblemPrimal}, sol::SGFEVector, C::AbstractStoch
                         for d in 1:ndofs4cell
                             lap[1] += coeffs[koff + celldofs[d, cell]] * Δvals[1, d, qp]
                             lap[2] += coeffs[koff + celldofs[d, cell]] * Δvals[2, d, qp]
+                            div += coeffs[koff + celldofs[d, cell]] * div_vals[1, d, qp]
                         end
                         lap4mode[:, k, qp] .= lap
+                        div4mode[k, qp] = div
                     end
                 end
 
@@ -698,10 +698,12 @@ function estimate(::Type{StokesProblemPrimal}, sol::SGFEVector, C::AbstractStoch
                         else
                             fill!(res, 0)
                         end
+                        res2 = 0
                         for (m, k, g) in neighbours4mode[j]
                             res .+= amvals[m + 1] * g * view(lap4mode, :, k, qp)
+                            res2 += amvals[m + 1] * g * div4mode[k, qp]
                         end
-                        eta4cell_2[cell, j] += (res[1]^2 + res[2]^2) * weights[qp]
+                        eta4cell_2[cell, j] += (res[1]^2 + res[2]^2) * weights[qp] + res2 * weights[qp]
                     end
                 end
             end
