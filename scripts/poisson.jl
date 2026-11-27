@@ -72,6 +72,7 @@ default_args = Dict(
     "maxdofs" => 1.0e4,
     "initial_modes" => [[0]],
     "nsamples" => 150,
+    "verbose" => true, # per-sample printouts during MC sampling
     "use_equilibration_estimator" => false,
     "use_iterative_solver" => true,
     "Plotter" => nothing,
@@ -183,6 +184,7 @@ function _main(
     θ_spatial = data["θ_spatial"]
     multi_indices = Array{Array{Int, 1}, 1}(data["initial_modes"])
     nsamples = data["nsamples"]
+    verbose = data["verbose"]
     f! = data["f"]
     bonus_quadorder_a = data["bonus_quadorder_a"]
     bonus_quadorder_f = data["bonus_quadorder_f"]
@@ -222,6 +224,8 @@ function _main(
         exact_error_u = zeros(Float64, 0),
         exact_error_stress_uni = zeros(Float64, 0),
         exact_error_u_uni = zeros(Float64, 0),
+        exact_error_energy = zeros(Float64, 0),
+        exact_error_energy_uni = zeros(Float64, 0),
         estimate = zeros(Float64, 0),
         estimate_active = zeros(Float64, 0),
         estimate_tail = zeros(Float64, 0),
@@ -232,9 +236,11 @@ function _main(
 
     sol = nothing
     lvl = 0
+    ## in verbose mode print errors for all truncation levels, otherwise only the full M
+    err4print(v, vu) = verbose ? "$(sqrt.(v)), $(sqrt.(vu))" : "$(sqrt(v[end])), $(sqrt(vu[end]))"
     while (true)
 
-        push!(df, [0 0 0 0 0 0 0 0 0 0 0 0])
+        push!(df, [zeros(1, 14)...])
 
         ###############################
         ## stochastic discretisation ##
@@ -296,20 +302,23 @@ function _main(
         ############
 
         ## exact error by hierarchic sampling
-        weightederrorH1, weightederrorL2, uniformerrorH1, uniformerrorL2 = calculate_sampling_error(sol, C; problem = problem, rhs = f!, order = order + 1, debug = debug, bonus_quadorder_a = bonus_quadorder_a, bonus_quadorder_f = bonus_quadorder_f, nsamples = nsamples)
+        metrics_configuration = [u_with_stress_metric_configuration..., energy_metric_configuration...]
+        l2stress_w, l2u_w, energy_w, l2stress_uni, l2u_uni, energy_uni = calculate_sampling_error(sol, C; problem = problem, rhs = f!, order = order + 1, debug = debug, bonus_quadorder_a = bonus_quadorder_a, bonus_quadorder_f = bonus_quadorder_f, nsamples = nsamples, verbose = verbose, metrics_configuration = metrics_configuration)
 
         ## error estimator
         tail_extension = data["tail_extension"]
         if use_equilibration_estimator
-            time_estimate = @elapsed η4modes, η4cells, multi_indices_extended, ζ_data = estimate_equilibration(problem, sol, C; rhs = f!, bonus_quadorder = max(bonus_quadorder_f, bonus_quadorder_a), tail_extension = tail_extension)
+            time_estimate = @elapsed η4modes, η4cells, multi_indices_extended, ζ_data = estimate_equilibration(problem, sol, C; rhs = f!, bonus_quadorder = max(bonus_quadorder_f, bonus_quadorder_a), tail_extension = tail_extension, verbose = verbose)
         else
-            time_estimate = @elapsed η4modes, η4cells, multi_indices_extended, ζ_data = estimate(problem, sol, C; rhs = f!, bonus_quadorder = max(bonus_quadorder_f, bonus_quadorder_a), tail_extension = tail_extension)
+            time_estimate = @elapsed η4modes, η4cells, multi_indices_extended, ζ_data = estimate(problem, sol, C; rhs = f!, bonus_quadorder = max(bonus_quadorder_f, bonus_quadorder_a), tail_extension = tail_extension, verbose = verbose)
         end
-        for j in 1:length(multi_indices_extended)
-            @info "mode = $(multi_indices_extended[j]) | error = $(η4modes[j])" # \t| f4mode = $(j <= length(multi_indices) ? f4modes[j] : 0)"
+        if verbose
+            for j in 1:length(multi_indices_extended)
+                @info "mode = $(multi_indices_extended[j]) | error = $(η4modes[j])" # \t| f4mode = $(j <= length(multi_indices) ? f4modes[j] : 0)"
+            end
         end
         df[lvl, :time_estimate] = time_estimate
-        @info ζ_data
+        verbose && @info ζ_data
 
         ## compute norms of solution modes and grad(am)
         # nmodes = length(multi_indices)
@@ -368,18 +377,21 @@ function _main(
 
         ## save RESULTS
         @info "FINAL RESULTS
-        || ∇(u-u_h) || (w,u) = $(sqrt.(weightederrorH1)), $(sqrt.(uniformerrorH1))
+        || ∇(u-u_h) ||_L2 (w,u) = $(err4print(l2stress_w, l2stress_uni))
+        || u - u_h ||_L2 (w,u) = $(err4print(l2u_w, l2u_uni))
+        || ∇(u-u_h) ||_A (w,u) = $(err4print(energy_w, energy_uni))
         estimator_total = $(sqrt(sum(η4modes .^ 2)))
         estimator_space = $(sqrt(EstimatorInterior))
-        estimator_stoch = $(sqrt(EstimatorBoundary))
-        || u - u_h || (w,u) = $(sqrt.(weightederrorL2)), $(sqrt.(uniformerrorL2))"
+        estimator_stoch = $(sqrt(EstimatorBoundary))"
 
         df[lvl, :ndofs_space] = sum([sol.FES_space[j].ndofs for j in 1:length(sol.FES_space)])
         df[lvl, :nmodes] = sol.TB.nmodes
-        df[lvl, :exact_error_stress] = sqrt(weightederrorH1[end])
-        df[lvl, :exact_error_u] = sqrt(weightederrorL2[end])
-        df[lvl, :exact_error_stress_uni] = sqrt(uniformerrorH1[end])
-        df[lvl, :exact_error_u_uni] = sqrt(uniformerrorL2[end])
+        df[lvl, :exact_error_stress] = sqrt(l2stress_w[end])
+        df[lvl, :exact_error_u] = sqrt(l2u_w[end])
+        df[lvl, :exact_error_stress_uni] = sqrt(l2stress_uni[end])
+        df[lvl, :exact_error_u_uni] = sqrt(l2u_uni[end])
+        df[lvl, :exact_error_energy] = sqrt(energy_w[end])
+        df[lvl, :exact_error_energy_uni] = sqrt(energy_uni[end])
         df[lvl, :estimate] = sqrt(sum(η4modes .^ 2))
         df[lvl, :estimate_active] = sqrt(EstimatorInterior)
         df[lvl, :estimate_tail] = sqrt(EstimatorBoundary)
@@ -468,7 +480,7 @@ function produce_plots(;
     if template == :convergence
         cols = [:estimate, :exact_error_stress]
     elseif template == :convergence_with_L2
-        cols = [:estimate, :exact_error_stress, :exact_error]
+        cols = [:estimate, :exact_error_stress, :exact_error_u]
     elseif template == :active_vs_tail
         cols = [:estimate_active, :estimate_tail, :estimate_tail_data]
     elseif template == :dofs
@@ -511,7 +523,9 @@ function produce_plots(;
             if cols[1] == :exact_error_u
                 ylabel = L"|| u - u_h ||_{L^2}"
             elseif cols[1] == :exact_error_stress
-                ylabel = L"|| u - u_h ||_A"
+                ylabel = L"|| ∇(u - u_h) ||_{L^2}"
+            elseif cols[1] == :exact_error_energy
+                ylabel = L"|| ∇(u - u_h) ||_A"
             elseif cols[1] == :estimate
                 ylabel = L"\eta"
             elseif cols[1] == :estimate_tail
@@ -565,7 +579,9 @@ function produce_plots(;
                     if cols[c] == :exact_error_u
                         label = L"|| u - u_h ||_{L^2}"
                     elseif cols[c] == :exact_error_stress
-                        label = L"|| u - u_h ||_A"
+                        label = L"|| ∇(u - u_h) ||_{L^2}"
+                    elseif cols[c] == :exact_error_energy
+                        label = L"|| ∇(u - u_h) ||_A"
                     elseif cols[c] == :estimate
                         if scaling_factor !== nothing
                             plotdata .*= scaling_factor

@@ -3,6 +3,8 @@ struct Metric
     ids::Vector{Tuple{Int, Int}}
     integrator::ExtendableFEM.ItemIntegrator
     solution::Vector{FEVectorBlock}
+    resultrow::Int
+    sample::Vector
 end
 
 struct MetricConfiguration
@@ -10,19 +12,27 @@ struct MetricConfiguration
     closure::Function
     resultdim::Union{Int, Nothing}
     kwargs::Union{Dict{Symbol, Any}, Nothing}
+    resultrow::Int
+    MetricConfiguration(name::String, closure::Function, resultdim = nothing, kwargs = nothing, resultrow::Int = 1) = new(name, closure, resultdim, kwargs, resultrow)
+end
+
+function create_weighted_squared_l2_dist_closure!(weight!::Union{Function, Nothing}, sample_pointer; kwargs...)
+    eval_weight = zeros(1)
+    return function (result, input, qpinfo)
+        N = length(input) >> 1
+        dist = sum((input[1:N] - input[(N + 1):(N << 1)]) .^ 2)
+        if isnothing(weight!)
+            result[1] = dist
+        else
+            weight!(eval_weight, qpinfo.x, sample_pointer)
+            result[1] = eval_weight[1] * dist
+        end
+        return nothing
+    end
 end
 
 function create_squared_l2_dist_closure!(; kwargs...)
-    inputdim = get(kwargs, :inputdim, nothing)
-    if !isnothing(inputdim) && isodd(inputdim)
-        throw(DomainError("inputdim must be even for l2 error calculation"))
-    end
-
-    return function (result, input, _)
-        N = (!isnothing(inputdim) ? inputdim : length(input)) >> 1
-        result[1] = sum((input[1:N] - input[(N + 1):(N << 1)]) .^ 2)
-        return nothing
-    end
+    return create_weighted_squared_l2_dist_closure!(nothing, nothing; kwargs...)
 end
 
 ## kernel for L2 error of stress, i.e || grad(u) - grad(u_h) ||
@@ -54,9 +64,37 @@ function data_error_u(
     return create_squared_l2_dist_closure!(; kwargs...), [id(1), id(2)], [(1, 2), (2, 2)]
 end
 
+## kernel for energy norm error of stress, i.e. || grad(u) - grad(u_h) ||_a
+## (weighted by the sampled diffusion coefficient, uses the current sample
+## stored in `sample_pointer`, see `setup_metrics`)
+function data_energy_stress(
+        ::Type{<:PoissonProblemPrimal},
+        C::AbstractStochasticCoefficient, sample_pointer; kwargs...
+    )
+    return create_weighted_squared_l2_dist_closure!(get_a!(C; factor = 1), sample_pointer; kwargs...), [grad(1), grad(2)], [(1, 1), (2, 1)]
+end
+
+function data_energy_stress(
+        ::Type{<:LogTransformedPoissonProblemPrimal},
+        C::AbstractStochasticCoefficient, sample_pointer; kwargs...
+    )
+    return create_weighted_squared_l2_dist_closure!(get_expa!(C; factor = 1), sample_pointer; kwargs...), [grad(1), grad(2)], [(1, 1), (2, 1)]
+end
+
+function data_energy_stress(
+        ::Type{<:LogTransformedPoissonProblemDual},
+        C::AbstractStochasticCoefficient, sample_pointer; kwargs...
+    )
+    return create_weighted_squared_l2_dist_closure!(get_expa!(C; factor = -1), sample_pointer; kwargs...), [id(1), id(2)], [(1, 1), (2, 1)]
+end
+
 u_with_stress_metric_configuration::Vector{MetricConfiguration} = [
     MetricConfiguration("L2stress", data_error_stress, 2, nothing),
     MetricConfiguration("L2u", data_error_u, 1, nothing),
+]
+
+energy_metric_configuration::Vector{MetricConfiguration} = [
+    MetricConfiguration("energyStress", data_energy_stress, 1, nothing),
 ]
 
 FES4sampling(::Type{PoissonProblemPrimal}, dim, xgrid, order) = [FESpace{H1Pk{1, dim, order}}(xgrid)]
@@ -69,9 +107,13 @@ function setup_metrics(
         problem,
         metrics_configuration::Vector{MetricConfiguration},
         C::AbstractStochasticCoefficient,
-        sample_pointer;
+        Samples;
         order::Int = 2
     )
+    ## shared storage for the currently evaluated sample, updated in-place
+    ## by `apply_error_integrators_from_metrics!` (used by weighted metrics)
+    current_sample = zeros(eltype(Samples), size(Samples, 1))
+
     ## collect metrics from metrics_configuration in a single list
     metrics = []
     for configuration in metrics_configuration
@@ -81,7 +123,7 @@ function setup_metrics(
         resultdim = isnothing(configuration.resultdim) ? 1 : configuration.resultdim
 
         kernel_closure!, input, ids = configuration.closure(
-            problem, C, sample_pointer; kwargs...
+            problem, C, current_sample; kwargs...
         )
 
         push!(
@@ -93,6 +135,8 @@ function setup_metrics(
                     kernel_closure!, input; resultdim, quadorder = 2 * order + 1
                 ),
                 Vector{FEVectorBlock}(undef, 2),
+                configuration.resultrow,
+                current_sample,
             ),
         )
     end
@@ -111,6 +155,7 @@ function sample_reference_solution(
         nsamples = 100,
         parallel_sampling = true,
         debug = false,
+        verbose = true,
     )
     ## prepare array with deterministic solutions
     sol_det = Vector{FEVector}(undef, nsamples)
@@ -131,7 +176,7 @@ function sample_reference_solution(
         )
 
         sol_det[s] = ExtendableFEM.solve(PD, FESSampling; verbosity = debug ? 0 : -1, timeroutputs = :none)
-        print(".")
+        verbose && print(".")
     end
     println(" MC samples solved")
 
@@ -147,6 +192,7 @@ function apply_error_integrators_from_metrics!(
         M,
         Msamples;
         dimensionwise_error = true,
+        verbose = true,
     )
     sol_sgfem = SolutionSGFEM.FEV
     M0 = dimensionwise_error ? 0 : M
@@ -171,19 +217,24 @@ function apply_error_integrators_from_metrics!(
         end
 
         csample = Samples[:, s]
+        for metric in metrics
+            metric.sample .= csample
+        end
         for m in M0:M
             y = view(csample, 1:m)
             set_sample!(SolutionSGFEM, y)
             for metric in metrics
                 sol = ExtendableFEM.evaluate(metric.integrator, metric.solution)
-                error_per_run[metric.name][m + 1, s] = sum(view(sol, 1, :))
+                error_per_run[metric.name][m + 1, s] = sum(view(sol, metric.resultrow, :))
             end
         end
 
-        @info "SAMPLE $s of $nsamples
-            sample = $(view(csample, 1:min(Msamples, 2 * M)))
-            weight = $(weights[s])
-            $(join(map(name -> "error($name) = $(error_per_run[name][end, s])", metric_names), "\n            "))"
+        if verbose
+            @info "SAMPLE $s of $nsamples
+                sample = $(view(csample, 1:min(Msamples, 2 * M)))
+                weight = $(weights[s])
+                $(join(map(name -> "error($name) = $(error_per_run[name][end, s])", metric_names), "\n                "))"
+        end
     end
 
     error = Dict()
@@ -226,6 +277,9 @@ The m-th component of these arrays gives the error when only multi-indices up to
 - `C`: The stochastic coefficient.
 - `problem`: The model problem type (default: `LogTransformedPoissonProblemPrimal`).
 - `metrics_configuration`: The metrics to be calculated (default: `u_with_stress_metric_configuration`).
+  Each `MetricConfiguration` selects via `resultrow` which result row of its kernel to integrate.
+  E.g. `[u_with_stress_metric_configuration..., energy_metric_configuration...]` additionally computes
+  the energy norm error weighted by the sampled diffusion coefficient.
 - `bonus_quadorder_a`: Additional quadrature order for the coefficient (default: 10).
 - `bonus_quadorder_f`: Additional quadrature order for the right-hand side (default: 0).
 - `order`: Polynomial order for the deterministic reference solution (default: 2).
@@ -235,6 +289,7 @@ The m-th component of these arrays gives the error when only multi-indices up to
 - `parallel_sampling`: Whether to use parallel sampling (default: true).
 - `dimensionwise_error`: If true, computes errors dimensionwise (default: false).
 - `debug`: If true, enables debug output and plotting (default: false).
+- `verbose`: If false, suppresses per-sample output during sampling (default: true).
 - `nsamples`: Number of Monte Carlo samples (default: 100).
 
 # Details
@@ -254,6 +309,7 @@ function calculate_sampling_error(
         parallel_sampling = true,
         dimensionwise_error = true,
         debug = false,
+        verbose = true,
         nsamples = 100
     )
     FES = SolutionSGFEM.FES_space
@@ -268,7 +324,7 @@ function calculate_sampling_error(
     FES4Sampling = FES4sampling(problem, dim, xgrid, order)
     sol_det = sample_reference_solution(
         problem, FES4Sampling, Samples, C;
-        rhs, bonus_quadorder_a, bonus_quadorder_f, nsamples, debug, parallel_sampling
+        rhs, bonus_quadorder_a, bonus_quadorder_f, nsamples, debug, parallel_sampling, verbose
     )
 
     ## create closure functions for each specified metric
@@ -277,6 +333,6 @@ function calculate_sampling_error(
     ## Calculate error for each metric
     M = maxlength_multiindices(TensorBasis)
     return apply_error_integrators_from_metrics!(
-        SolutionSGFEM, sol_det, metrics, Samples, weights, M, Msamples; dimensionwise_error
+        SolutionSGFEM, sol_det, metrics, Samples, weights, M, Msamples; dimensionwise_error, verbose
     )
 end

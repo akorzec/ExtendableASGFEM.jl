@@ -90,6 +90,7 @@ export PoissonProblemPrimal
 
 include("sampling_error.jl")
 export calculate_sampling_error
+export MetricConfiguration, u_with_stress_metric_configuration, energy_metric_configuration
 
 include("estimate.jl")
 export estimate

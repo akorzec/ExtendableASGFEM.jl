@@ -188,6 +188,7 @@ function classify_modes(multi_indices, active_modes = multi_indices)
                 push!(active_bnd, j)
             else
                 for k in 1:(last_nonzero_pos + 1)
+                    resize!(new_multi_index, length(multi_indices[j]))
                     new_multi_index .= multi_indices[j]
                     new_multi_index[k] += 1
                     if new_multi_index in active_modes
@@ -204,7 +205,8 @@ function classify_modes(multi_indices, active_modes = multi_indices)
             end
         else # inactive mode
             bnd_level = 0
-            for k in 1:min(last_nonzero_pos + 1, length(new_multi_index))
+            for k in 1:min(last_nonzero_pos + 1, length(multi_indices[j]))
+                resize!(new_multi_index, length(multi_indices[j]))
                 new_multi_index .= multi_indices[j]
                 if new_multi_index[k] > 0
                     new_multi_index[k] -= 1

@@ -94,6 +94,7 @@ function main(;
         f! = (result, qpinfo) -> (result[1] = 1), # right-hand side
         use_iterative_solver = true,
         calculate_error = true, # compute Monte Carlo error estimates (set false for quick solver-only runs)
+        nsamples = 50,      # number of Monte Carlo samples for the error estimate
         Plotter = UnicodePlots,
     )
 
@@ -118,18 +119,21 @@ function main(;
 
     ## compute a Monte Carlo reference error estimate
     if calculate_error
-        weightederrorH1, weightederrorL2, uniformerrorH1, uniformerrorL2 = calculate_sampling_error(
+        metrics_configuration = [u_with_stress_metric_configuration..., energy_metric_configuration...]
+        l2stress_w, l2u_w, energy_w, l2stress_uni, l2u_uni, energy_uni = calculate_sampling_error(
             sol,
             C;
             problem = problem,
+            metrics_configuration = metrics_configuration,
             rhs = f!,
             order = order + 1,
-            nsamples = 50,
+            nsamples = nsamples,
         )
 
         @info "RESULTS
-        || ∇(u-u_h) || (w,u) = $(sqrt(weightederrorH1[end])), $(sqrt(uniformerrorH1[end]))
-        || u - u_h || (w,u) = $(sqrt(weightederrorL2[end])), $(sqrt(uniformerrorL2[end]))"
+        || ∇(u-u_h) ||_L2 (w,u) = $(sqrt(l2stress_w[end])), $(sqrt(l2stress_uni[end]))
+        || u - u_h ||_L2 (w,u) = $(sqrt(l2u_w[end])), $(sqrt(l2u_uni[end]))
+        || ∇(u-u_h) ||_A (w,u) = $(sqrt(energy_w[end])), $(sqrt(energy_uni[end]))"
     end
 
     ## plot the stochastic modes if a plotting backend was requested

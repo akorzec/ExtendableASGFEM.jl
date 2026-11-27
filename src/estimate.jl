@@ -1,7 +1,7 @@
 function get_neighbours(OBT, multi_indices)
     M = length(multi_indices[1])
     nmodes = length(multi_indices)
-    idx4mode = Dict{NTuple{M,Int},Int}()
+    idx4mode = Dict{NTuple{M, Int}, Int}()
     for k in 1:nmodes
         idx4mode[(multi_indices[k]...,)] = k
     end
@@ -91,8 +91,10 @@ function prepare_extended_modes(sol::SGFEVector; tail_extension = [10, 2])
     ## destructured return values (a bare return of the cache entry would type the callers'
     ## G, mneighbours..., etc. as Any and break the type stability of the estimator loops).
     cacheval = _extended_modes_cache[cachekey]
-    return (cacheval[1]::Vector{Vector{Int}}, cacheval[2]::TensorizedBasis{Float64}, cacheval[3]::ExtendableSparseMatrix{Float64, Int64},
-            cacheval[4]::Matrix{Int}, cacheval[5]::Matrix{Int}, cacheval[6]::Int, cacheval[7]::Int)
+    return (
+        cacheval[1]::Vector{Vector{Int}}, cacheval[2]::TensorizedBasis{Float64}, cacheval[3]::ExtendableSparseMatrix{Float64, Int64},
+        cacheval[4]::Matrix{Int}, cacheval[5]::Matrix{Int}, cacheval[6]::Int, cacheval[7]::Int,
+    )
 end
 
 """
@@ -128,7 +130,7 @@ function estimate(::Type{AbstractModelProblem}, sol::SGFEVector, C::AbstractStoc
 end
 
 
-function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = [10, 2])
+function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = [10, 2], verbose = true)
     if rhs === nothing
         error("estimate: a right-hand side `rhs` is needed for the residual computation")
     end
@@ -176,14 +178,14 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
     ## below to keep the hot loop in barrier() type stable.
     interpkey = (quadorder, multi_indices_extended, C, objectid(xgrid), hash(xgrid[Coordinates]))
     if !haskey(_lambda_interp_cache, interpkey)
-        @info "interpolating <e^-a, H_nu> for all modes with quadorder = $quadorder"
+        verbose && @info "interpolating <e^-a, H_nu> for all modes with quadorder = $quadorder"
         ## expansion of the coefficient, lambda_μ!(result, x, μ) evaluates <e^-a, H_μ>(x)
         expa_PCE!, lambda_μ! = expa_PCE_mop(TB_extended, C; factor = -1.0)
         FES_interp = FESpace{H1Pk{1, 2, quadorder}}(xgrid)
         FEBasis_id = FEEvaluator(FES_interp, ExtendableFEMBase.Identity, qf)
         expaf_interpolations = FEVector([FES_interp for j in 1:nmodes_extended])
         for j in 1:nmodes_extended
-            interpolate!(expaf_interpolations[j], (result, qpinfo) -> lambda_μ!(result, qpinfo.x, j); quadorder = 2*quadorder)
+            interpolate!(expaf_interpolations[j], (result, qpinfo) -> lambda_μ!(result, qpinfo.x, j); quadorder = 2 * quadorder)
         end
         length(_lambda_interp_cache) >= _lambda_interp_cache_maxlen && empty!(_lambda_interp_cache)
         _lambda_interp_cache[interpkey] = (FEBasis_id, expaf_interpolations, FES_interp[CellDofs], FES_interp.ndofs, get_ndofs(ON_CELLS, H1Pk{1, 2, quadorder}, EG))
@@ -256,7 +258,7 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
                     kmL2 += am[1]^2
                 end
                 rhs(ftemp, x)
-                ζ_data1 += ftemp[1]^2 * exp(2*kmL2) * weights[qp] * cellvolumes[cell]
+                ζ_data1 += ftemp[1]^2 * exp(2 * kmL2) * weights[qp] * cellvolumes[cell]
                 fval = ftemp[1]
 
                 ## h_T|| f_nu + \sigma_\nu ||
@@ -313,8 +315,10 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
 
     barrier(EG, L2G)
 
-    for j in 1:nmodes_extended
-        @info "mode = $(multi_indices_extended[j]) \t ||f_nu||^2 = $(f4modes[j]))"
+    if verbose
+        for j in 1:nmodes_extended
+            @info "mode = $(multi_indices_extended[j]) \t ||f_nu||^2 = $(f4modes[j]))"
+        end
     end
 
     ## compute normal jumps
@@ -332,19 +336,19 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
         eta4modes[j] = sqrt(eta4modes[j]^2 + sum(view(jumps4face, :)))
     end
 
-    ζ_data = ζ_data1-ζ_data2
+    ζ_data = ζ_data1 - ζ_data2
     if ζ_data < 0
         @warn "negative data truncation error estimate = $(ζ_data) (ζ_data1 = $(ζ_data1), ζ_data2 = $(ζ_data2))
             This is likely due to insufficient quadrature order for the interpolation of <e^-a, H_nu>."
     else
-        @info "estimated data truncation error = $(ζ_data) (ζ_data1 = $(ζ_data1), ζ_data2 = $(ζ_data2))"
+        verbose && @info "estimated data truncation error = $(ζ_data) (ζ_data1 = $(ζ_data1), ζ_data2 = $(ζ_data2))"
     end
 
-    return eta4modes, eta4cell, multi_indices_extended, ζ_data1-ζ_data2 #, f4modes
+    return eta4modes, eta4cell, multi_indices_extended, ζ_data1 - ζ_data2 #, f4modes
 end
 
 
-function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = [10, 2])
+function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = [10, 2], verbose = true)
     if rhs === nothing
         error("estimate: a right-hand side `rhs` is needed for the residual computation")
     end
@@ -736,7 +740,7 @@ end
 
 ## this function computes the local equilibrated fluxes
 ## by solving local problems on (disjunct groups of) node patches
-function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; FETypeDual = nothing, rhs = nothing, tail_extension = [10, 2], bonus_quadorder = 0)
+function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; FETypeDual = nothing, rhs = nothing, tail_extension = [10, 2], bonus_quadorder = 0, verbose = true)
     if rhs === nothing
         error("estimate_equilibration: a right-hand side `rhs` is needed for the residual computation")
     end
@@ -970,7 +974,7 @@ function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C
     #Threads.@threads
     for group in groups
         grouptime = @elapsed begin
-            @info "  Starting equilibrating patch group $group on thread $(Threads.threadid())... "
+            verbose && @info "  Starting equilibrating patch group $group on thread $(Threads.threadid())... "
 
             for mode in 1:nmodes_extended
                 X[group, mode] = solve_patchgroup!(group, mode)
@@ -978,7 +982,7 @@ function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C
 
         end
 
-        @info "Finished equilibration patch group $group on thread $(Threads.threadid()) in $(grouptime)s "
+        verbose && @info "Finished equilibration patch group $group on thread $(Threads.threadid()) in $(grouptime)s "
     end
 
     ## write local solutions to global vector
