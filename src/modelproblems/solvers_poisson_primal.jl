@@ -268,7 +268,8 @@ function solve_primal!(SolutionSGFEM::SGFEVector, A0, Am, b0, G, nmodes; atol = 
         ifcache = false,
     )
     prob = LinearProblem(Aop, b.entries)
-    sol = solve(prob;
+    sol = solve(
+        prob;
         alg = KrylovJL_GMRES(),
         abstol = atol,
         reltol = rtol,
