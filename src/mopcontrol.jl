@@ -165,6 +165,19 @@ A tuple of five vectors containing the indices of the multi-indices in the follo
 `(inactive_else, inactive_bnd, inactive_bnd2, active_bnd, active_int)`.
 """
 function classify_modes(multi_indices, active_modes = multi_indices)
+    ## tail extension may produce multi-indices of different lengths (new stochastic
+    ## dimensions are appended to some modes only); since trailing zeros are significant
+    ## for `==`, comparisons against active_modes would silently fail. Hence, normalize
+    ## copies of both lists to a common length before classifying.
+    L = maximum(length(m) for m in multi_indices)
+    if !isempty(active_modes)
+        L = max(L, maximum(length(m) for m in active_modes))
+    end
+    if any(length(m) < L for m in multi_indices) || any(length(m) < L for m in active_modes)
+        padded(m) = vcat(m, zeros(Int, L - length(m)))
+        multi_indices = [padded(m) for m in multi_indices]
+        active_modes = [padded(m) for m in active_modes]
+    end
     active_bnd = Int[] # have an inactive neighbour
     active_int = Int[] # all neighbour modes are active
     inactive_bnd = Int[] # first layer of inactive modes

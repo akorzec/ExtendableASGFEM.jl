@@ -130,7 +130,7 @@ function estimate(::Type{AbstractModelProblem}, sol::SGFEVector, C::AbstractStoc
 end
 
 
-function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = [10, 2], verbose = true)
+function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = [10, 2], verbose = false)
     if rhs === nothing
         error("estimate: a right-hand side `rhs` is needed for the residual computation")
     end
@@ -348,7 +348,7 @@ function estimate(::Type{LogTransformedPoissonProblemPrimal}, sol::SGFEVector, C
 end
 
 
-function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = [10, 2], verbose = true)
+function estimate(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; rhs = nothing, bonus_quadorder = 1, tail_extension = [10, 2], verbose = false)
     if rhs === nothing
         error("estimate: a right-hand side `rhs` is needed for the residual computation")
     end
@@ -740,7 +740,7 @@ end
 
 ## this function computes the local equilibrated fluxes
 ## by solving local problems on (disjunct groups of) node patches
-function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; FETypeDual = nothing, rhs = nothing, tail_extension = [10, 2], bonus_quadorder = 0, verbose = true)
+function estimate_equilibration(::Type{PoissonProblemPrimal}, sol::SGFEVector, C::AbstractStochasticCoefficient; FETypeDual = nothing, rhs = nothing, tail_extension = [10, 2], bonus_quadorder = 0, verbose = false)
     if rhs === nothing
         error("estimate_equilibration: a right-hand side `rhs` is needed for the residual computation")
     end

@@ -155,7 +155,7 @@ function sample_reference_solution(
         nsamples = 100,
         parallel_sampling = true,
         debug = false,
-        verbose = true,
+        verbose = false,
     )
     ## prepare array with deterministic solutions
     sol_det = Vector{FEVector}(undef, nsamples)
@@ -192,7 +192,7 @@ function apply_error_integrators_from_metrics!(
         M,
         Msamples;
         dimensionwise_error = true,
-        verbose = true,
+        verbose = false,
     )
     sol_sgfem = SolutionSGFEM.FEV
     M0 = dimensionwise_error ? 0 : M
@@ -309,7 +309,7 @@ function calculate_sampling_error(
         parallel_sampling = true,
         dimensionwise_error = true,
         debug = false,
-        verbose = true,
+        verbose = false,
         nsamples = 100
     )
     FES = SolutionSGFEM.FES_space

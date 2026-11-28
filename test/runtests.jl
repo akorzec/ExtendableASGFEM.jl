@@ -229,6 +229,46 @@ function main()
         @test ζ_data == 0.0
     end
 
+    @testset "mode extension and classification" begin
+        # add_boundary_modes: superset with uniform lengths, active modes kept in front,
+        # first-order children of all (incl. new) dimensions and next degree in dim 1
+        ext = add_boundary_modes(deepcopy([[0, 0]]); p_extension = 1, tail_extension = [3, 2])
+        @test ext[1] == [0, 0, 0]
+        @test unique(length.(ext)) == [3]
+        @test [1, 0, 0] in ext
+        @test [0, 1, 0] in ext
+        @test [0, 0, 1] in ext
+        ext = add_boundary_modes(deepcopy([[1, 0]]); p_extension = 1, tail_extension = [3, 2])
+        @test ext[1] == [1, 0, 0]
+        @test [2, 0, 0] in ext
+        @test [1, 1, 0] in ext
+        @test [1, 0, 1] in ext
+
+        # classify_modes on a uniform list
+        ext = [[0, 0], [1, 0], [0, 1], [2, 0], [1, 1], [0, 2]]
+        act = [[0, 0], [1, 0]]
+        inactive_else, inactive_bnd, inactive_bnd2, active_bnd, active_int = classify_modes(ext, act)
+        @test isempty(inactive_else)
+        @test isempty(active_int)
+        @test active_bnd == [1, 2]
+        @test sort(inactive_bnd) == [3, 4, 5]
+        @test inactive_bnd2 == [6]
+
+        # regression: ragged lists (a new stochastic dimension is appended to some modes
+        # only, as produced by tail extensions) must not break the ==-based neighbour
+        # checks; previously [1,0,...] was silently demoted to inactive_else and hence
+        # never offered for refinement, while its active parent became active_int
+        ext = [[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+               [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+               [0, 0, 0, 0, 0, 0, 0, 0, 0]]
+        inactive_else, inactive_bnd, inactive_bnd2, active_bnd, active_int = classify_modes(ext, ext[3:3])
+        @test isempty(inactive_else)
+        @test sort(inactive_bnd) == [1, 2]
+        @test active_bnd == [3]
+        @test isempty(active_int)
+        @test isempty(inactive_bnd2)
+    end
+
     return
 end
 
